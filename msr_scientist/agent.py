@@ -15,7 +15,12 @@ class ResearchAgent:
             api_key: API key for the model provider
         """
         self.model = model
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        if api_key:
+            self.api_key = api_key
+        elif "claude" in self.model.lower():
+            self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        else:
+            self.api_key = os.getenv("OPENAI_API_KEY")
         self.messages: List[Dict[str, str]] = []
         self.system_prompt = self._get_system_prompt()
 
