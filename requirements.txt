@@ -2,7 +2,7 @@
 dotenv
 numpy
 pandas
-pylatex
+PyTinyTeX
 scipy
 scikit-learn
 smolagents[toolkit]
