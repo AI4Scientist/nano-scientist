@@ -10,8 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -19,12 +17,20 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 venv/
 env/
 ENV/
-.venv
+.venv/
 
 # IDE
 .claude/
@@ -38,16 +44,24 @@ ENV/
 .env
 .env.local
 
-# Outputs
-outputs/
-experiments/
-*.pdf
-*.log
+# LaTeX intermediate files
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.synctex.gz
+*.xdv
+*.nav
+*.snm
+*.vrb
+*.bbl
+*.blg
+
+# Research outputs (generated artifacts)
+research_outputs/
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Research artifacts
-papers/
-results/
+.directory

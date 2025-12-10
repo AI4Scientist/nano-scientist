@@ -18,30 +18,34 @@ PLAN → IMPLEMENT → VERIFY → SHIP
 ## Installation
 
 ```bash
-pip install -r requirements.txt
-export HF_TOKEN=your_huggingface_token
+# Install dependencies with uv (recommended)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+uv run install-tectonic
+
+# Or use the quick setup script
+./setup.sh
+```
+
+**Configure API keys** - Create a `.env` file:
+```bash
+# Required
+HF_TOKEN=your_huggingface_token
+OPENAI_API_KEY=your_openai_key
+TAVILY_API_KEY=your_tavily_key  # or PERPLEXITY_API_KEY
 ```
 
 ## Quick Start
 
-```python
-from mini_researcher_agent import create_agent
-
-agent = create_agent()
-agent.research("Compare bubble sort vs quicksort performance")
+```bash
+python example.py 1  # Basic usage demo
 ```
 
-That's it! The agent will:
+The agent will:
 1. Generate hypotheses
 2. Install any needed packages
 3. Run experiments
 4. Draft a research paper
-
-## CLI Usage
-
-```bash
-python mini_researcher_agent.py "Your research task here"
-```
 
 ## How It Works
 
@@ -56,50 +60,31 @@ The agent has 3 core tools:
 - Write code to create new capabilities
 - Follow the research cycle: plan → implement → verify → ship
 
-## Example
-
-```python
-from mini_researcher_agent import create_agent
-
-agent = create_agent()
-
-agent.research("""
-Investigate: Are Python list comprehensions faster than loops?
-
-1. Formulate hypothesis
-2. Design timing experiments
-3. Run tests with different data sizes
-4. Analyze results
-5. Draft paper with findings
-""")
-```
-
-Check `outputs/` for generated papers and results.
-
 ## Architecture
 
 ```
 mini-researcher-agent/
-├── mini_researcher_agent.py   # Everything (agent + tools + prompt)
-├── example.py         # Usage example
-├── requirements.txt   # Dependencies
-└── README.md         # This file
+├── src/               # Core modules
+├── example.py         # Usage examples
+├── setup.sh          # Quick setup script
+└── requirements.txt  # Dependencies
 ```
 
-**Total: ~250 lines of code** 🎯
+Three-stage pipeline: Planning → Execution → Reporting
 
 ## Philosophy
 
-- **Minimal**: One file, essential tools only
-- **Autonomous**: Agent installs packages and evolves itself
-- **Research-focused**: Built for hypothesis → experiment → paper workflows
-- **Self-evolving**: Guided by system prompt, not rigid code
+- **Minimal**: Essential tools only, no bloat
+- **Autonomous**: Self-evolving through tool creation
+- **Research-focused**: Built for the scientific method
+- **Stage-based**: Plan → Execute → Report
 
 ## Requirements
 
-- Python 3.9+
-- HuggingFace API token
-- LaTeX (optional, for PDF compilation)
+- Python 3.8+
+- OpenAI API key + HuggingFace token
+- Tavily or Perplexity API (for search)
+- Tectonic (auto-installed for PDF generation)
 
 ## License
 
@@ -109,14 +94,3 @@ Apache-2.0
 
 - [mini-swe-agent](https://github.com/OpenDevin/mini-swe-agent)
 - [smolagents](https://github.com/huggingface/smolagents)
-
----
-
-**Start researching:**
-
-```python
-from mini_researcher_agent import create_agent
-create_agent().research("Your question here")
-```
-
-🔬 **Happy researching!**

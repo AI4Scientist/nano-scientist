@@ -1,0 +1,49 @@
+[project]
+name = "mini-researcher-agent"
+version = "0.1.0"
+description = "A minimalist self-evolving research agent with 3-stage pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Core dependencies
+    "litellm>=1.0.0",
+
+    # Stage 1: Research & Planning
+    "tavily-python>=0.3.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+
+    # Stage 2: Execute & Analyze
+    "mini-swe-agent>=0.1.0",
+
+    # Main orchestrator
+    "smolagents>=0.1.0",
+    "python-dotenv>=1.0.0",
+
+    # Optional: Data processing and visualization
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+
+    # Optional: Advanced search APIs
+    "ddgs>=9.0.0",
+]
+
+[project.scripts]
+install-tectonic = "src.install_tectonic:main"
+
+[tool.uv]
+# Tectonic (LaTeX engine) must be installed separately as a system binary
+# It's a Rust executable, not a Python package
+# Run: uv run install-tectonic
+# Or manually: curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
+
+[tool.setuptools]
+packages = ["src"]
+py-modules = ["install_tectonic"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

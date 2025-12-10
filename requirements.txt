@@ -1,9 +1,47 @@
-# Minimal dependencies for mini-researcher-agent
-dotenv
-numpy
-pandas
-PyTinyTeX
-scipy
-scikit-learn
-smolagents[toolkit]
-matplotlib
+# Core dependencies for Mini Researcher Agent
+# ============================================================================
+#
+# Quick Installation Options:
+#
+#   Option 1 (Easiest):
+#     ./setup.sh
+#
+#   Option 2 (UV with automation):
+#     uv sync
+#     uv run install-tectonic
+#
+#   Option 3 (Traditional):
+#     pip install -r requirements.txt
+#     # Then install Tectonic manually - see INSTALL.md
+#
+# Note: Tectonic (LaTeX engine) must be installed separately
+# ============================================================================
+
+# Universal LLM interface for all stages
+litellm>=1.0.0
+
+# Stage 1: Research & Planning (uses LiteLLM directly)
+tavily-python>=0.3.0
+pydantic>=2.0.0
+requests>=2.31.0
+
+# Stage 2: Execute & Analyze (execute_analyze.py)
+mini-swe-agent>=0.1.0
+
+# Stage 3: Report Generation (report_write.py)
+# Note: Requires tectonic binary (self-contained LaTeX engine)
+# Install via: curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
+
+# Main orchestrator (researcher.py)
+smolagents>=0.1.0
+python-dotenv>=1.0.0
+
+# Optional: Data processing and visualization
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# Optional: Advanced search APIs
+ddgs>=9.0.0
