@@ -18,7 +18,50 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 # Ensure .env is loaded
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
+
+
+def run_pipeline(task: str, output_dir: str = "research_output") -> dict:
+    """Run the full 3-stage research pipeline and return results.
+
+    Guarantees PDF generation by explicitly calling all three stages.
+
+    Args:
+        task: The research question or topic
+        output_dir: Directory for outputs
+
+    Returns:
+        Dict with proposal_file, workspace, pdf_path keys
+    """
+    print("Step 1: Research and Planning...")
+    stage1_result = research_and_plan(task, output_dir)
+    stage1_data = json.loads(stage1_result)
+    print(f"  Proposal file: {stage1_data['proposal_file']}")
+    print(f"  Citations: {stage1_data['num_citations']}")
+    print(f"  Hypotheses: {stage1_data['num_hypotheses']}")
+
+    print("\nStep 2: Execute and Analyze...")
+    stage2_result = execute_and_analyze(stage1_data['proposal_file'])
+    stage2_data = json.loads(stage2_result)
+    print(f"  Workspace: {stage2_data['workspace']}")
+    print(f"  Cost: ${stage2_data['cost_usd']:.4f}")
+
+    print("\nStep 3: Generate Report (ACM PDF)...")
+    stage3_result = report_and_write(
+        stage1_data['proposal_file'],
+        stage2_data['workspace']
+    )
+    stage3_data = json.loads(stage3_result)
+    print(f"  PDF: {stage3_data['pdf_path']}")
+
+    return {
+        "proposal_file": stage1_data['proposal_file'],
+        "workspace": stage2_data['workspace'],
+        "pdf_path": stage3_data['pdf_path'],
+        "stage1": stage1_data,
+        "stage2": stage2_data,
+        "stage3": stage3_data,
+    }
 
 
 def example_1_basic_usage():
@@ -27,21 +70,15 @@ def example_1_basic_usage():
     print("Example 1: Basic Usage")
     print("="*70 + "\n")
 
-    from main import ResearchAgent
-
-    # Initialize agent with defaults
-    agent = ResearchAgent()
-
-    # Run a simple research task
     task = (
         "Compare bubble sort and quicksort performance characteristics. "
         "Generate a research paper in PDF using the ACM template."
     )
     print(f"Task: {task}\n")
 
-    result = agent(task)
+    result = run_pipeline(task)
 
-    print(f"\nResult: {result}")
+    print(f"\nComplete! Final PDF: {result['pdf_path']}")
 
 
 def example_2_custom_config():
@@ -50,14 +87,10 @@ def example_2_custom_config():
     print("Example 2: Custom Configuration")
     print("="*70 + "\n")
 
-    from main import ResearchAgent
-
-    # Set custom environment variables before initialization
+    # Set custom environment variables before running pipeline
     os.environ["STAGE1_MAX_LOOPS"] = "10"  # More research loops
     os.environ["STAGE2_STEP_LIMIT"] = "100"  # More agent steps
     os.environ["STAGE2_COST_LIMIT"] = "5.0"  # Higher cost limit
-
-    agent = ResearchAgent(verbose=True)
 
     task = (
         "Research the latest advances in transformer attention mechanisms in 2024. "
@@ -65,9 +98,9 @@ def example_2_custom_config():
     )
     print(f"Task: {task}\n")
 
-    result = agent(task)
+    result = run_pipeline(task)
 
-    print(f"\nResult: {result}")
+    print(f"\nComplete! Final PDF: {result['pdf_path']}")
 
 
 def example_3_minimal_config():
@@ -76,14 +109,10 @@ def example_3_minimal_config():
     print("Example 3: Minimal Configuration (Quick Mode)")
     print("="*70 + "\n")
 
-    from main import ResearchAgent
-
     # Set minimal configuration
     os.environ["STAGE1_MAX_LOOPS"] = "2"  # Fewer research loops
     os.environ["STAGE2_STEP_LIMIT"] = "20"  # Fewer agent steps
     os.environ["STAGE2_COST_LIMIT"] = "0.5"  # Lower cost limit
-
-    agent = ResearchAgent(verbose=True)
 
     task = (
         "Implement FizzBuzz with unit tests. "
@@ -91,9 +120,9 @@ def example_3_minimal_config():
     )
     print(f"Task: {task}\n")
 
-    result = agent(task)
+    result = run_pipeline(task)
 
-    print(f"\nResult: {result}")
+    print(f"\nComplete! Final PDF: {result['pdf_path']}")
 
 
 def example_4_with_error_handling():
@@ -102,11 +131,6 @@ def example_4_with_error_handling():
     print("Example 4: Error Handling")
     print("="*70 + "\n")
 
-    from main import ResearchAgent
-    import json
-
-    agent = ResearchAgent(verbose=False)
-
     task = (
         "Research Python list comprehensions performance. "
         "Generate a research paper in PDF using the ACM template."
@@ -114,16 +138,13 @@ def example_4_with_error_handling():
     print(f"Task: {task}\n")
 
     try:
-        result = agent(task)
-        print(f"Success! Result:\n{result}")
+        result = run_pipeline(task)
+        print(f"\nSuccess! Final PDF: {result['pdf_path']}")
 
-        # Parse result if it's JSON
-        try:
-            result_data = json.loads(result)
-            if isinstance(result_data, dict):
-                print(f"\nParsed result keys: {list(result_data.keys())}")
-        except json.JSONDecodeError:
-            print("\nResult is not JSON (plain text)")
+        # Show stage details
+        for stage_name in ("stage1", "stage2", "stage3"):
+            stage_data = result[stage_name]
+            print(f"\n{stage_name} keys: {list(stage_data.keys())}")
 
     except Exception as e:
         print(f"Error occurred: {type(e).__name__}: {e}")
@@ -143,31 +164,11 @@ def example_5_programmatic_workflow():
         "Implement binary search and measure performance. "
         "Generate a research paper in PDF using the ACM template."
     )
-    output_dir = "research_outputs"
 
-    print("Step 1: Research and Planning...")
-    stage1_result = research_and_plan(task, output_dir)
-    stage1_data = json.loads(stage1_result)
-    print(f"  ✓ Proposal file: {stage1_data['proposal_file']}")
-    print(f"  ✓ Citations: {stage1_data['num_citations']}")
-    print(f"  ✓ Hypotheses: {stage1_data['num_hypotheses']}")
-
-    print("\nStep 2: Execute and Analyze...")
-    stage2_result = execute_and_analyze(stage1_data['proposal_file'])
-    stage2_data = json.loads(stage2_result)
-    print(f"  ✓ Workspace: {stage2_data['workspace']}")
-    print(f"  ✓ Cost: ${stage2_data['cost_usd']:.4f}")
-
-    print("\nStep 3: Generate Report (ACM PDF)...")
-    stage3_result = report_and_write(
-        stage1_data['proposal_file'],
-        stage2_data['workspace']
-    )
-    stage3_data = json.loads(stage3_result)
-    print(f"  ✓ PDF: {stage3_data['pdf_path']}")
+    result = run_pipeline(task, output_dir="research_outputs")
 
     print("\n" + "="*70)
-    print(f"Complete! Final PDF: {stage3_data['pdf_path']}")
+    print(f"Complete! Final PDF: {result['pdf_path']}")
     print("="*70)
 
 
@@ -176,10 +177,6 @@ def example_6_matrix_subregion_sum():
     print("\n" + "="*70)
     print("Example 6: Matrix Rectangular Region Sum")
     print("="*70 + "\n")
-
-    from main import ResearchAgent
-
-    agent = ResearchAgent(verbose=True)
 
     task = (
         "In a two-dimensional square matrix, find a rectangular region "
@@ -191,9 +188,9 @@ def example_6_matrix_subregion_sum():
     )
     print(f"Task: {task}\n")
 
-    result = agent(task)
+    result = run_pipeline(task)
 
-    print(f"\nResult: {result}")
+    print(f"\nComplete! Final PDF: {result['pdf_path']}")
 
 
 def check_environment():
