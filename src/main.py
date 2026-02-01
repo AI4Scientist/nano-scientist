@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from smolagents import CodeAgent, LiteLLMModel, tool, LogLevel
 from src.config import get_config, ModelConfig
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ============================================================================
 # TOOLS - Thin wrappers around stage modules

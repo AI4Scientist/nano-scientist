@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 
-def run_pipeline(task: str, output_dir: str = "research_output") -> dict:
+def run_pipeline(task: str, output_dir: str = "research_outputs") -> dict:
     """Run the full 3-stage research pipeline and return results.
 
     Guarantees PDF generation by explicitly calling all three stages.
