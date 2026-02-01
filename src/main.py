@@ -12,11 +12,10 @@ import json
 import sys
 import uuid
 from pathlib import Path
-from datetime import datetime
 
 from dotenv import load_dotenv
 from smolagents import CodeAgent, LiteLLMModel, tool, LogLevel
-from config import get_config, ModelConfig
+from src.config import get_config, ModelConfig
 
 load_dotenv()
 

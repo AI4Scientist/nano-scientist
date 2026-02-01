@@ -10,6 +10,8 @@ Demonstrates different ways to use the research agent:
 import os
 import sys
 from pathlib import Path
+from src.main import research_and_plan, execute_and_analyze, report_and_write
+import json
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -31,7 +33,10 @@ def example_1_basic_usage():
     agent = ResearchAgent()
 
     # Run a simple research task
-    task = "Compare bubble sort and quicksort performance characteristics"
+    task = (
+        "Compare bubble sort and quicksort performance characteristics. "
+        "Generate a research paper in PDF using the ACM template."
+    )
     print(f"Task: {task}\n")
 
     result = agent(task)
@@ -54,7 +59,10 @@ def example_2_custom_config():
 
     agent = ResearchAgent(verbose=True)
 
-    task = "Research the latest advances in transformer attention mechanisms in 2024"
+    task = (
+        "Research the latest advances in transformer attention mechanisms in 2024. "
+        "Generate a research paper in PDF using the ACM template."
+    )
     print(f"Task: {task}\n")
 
     result = agent(task)
@@ -77,7 +85,10 @@ def example_3_minimal_config():
 
     agent = ResearchAgent(verbose=True)
 
-    task = "Implement FizzBuzz with unit tests"
+    task = (
+        "Implement FizzBuzz with unit tests. "
+        "Generate a research paper in PDF using the ACM template."
+    )
     print(f"Task: {task}\n")
 
     result = agent(task)
@@ -96,7 +107,10 @@ def example_4_with_error_handling():
 
     agent = ResearchAgent(verbose=False)
 
-    task = "Research Python list comprehensions performance"
+    task = (
+        "Research Python list comprehensions performance. "
+        "Generate a research paper in PDF using the ACM template."
+    )
     print(f"Task: {task}\n")
 
     try:
@@ -125,31 +139,29 @@ def example_5_programmatic_workflow():
     print("Example 5: Programmatic Workflow (Direct Tool Calls)")
     print("="*70 + "\n")
 
-    from main import research_and_plan, execute_and_analyze, report_and_write
-    import json
-
-    task = "Implement binary search and measure performance"
+    task = (
+        "Implement binary search and measure performance. "
+        "Generate a research paper in PDF using the ACM template."
+    )
     output_dir = "research_outputs"
 
     print("Step 1: Research and Planning...")
     stage1_result = research_and_plan(task, output_dir)
     stage1_data = json.loads(stage1_result)
-    print(f"  ✓ Plan file: {stage1_data['plan_file']}")
+    print(f"  ✓ Proposal file: {stage1_data['proposal_file']}")
     print(f"  ✓ Citations: {stage1_data['num_citations']}")
     print(f"  ✓ Hypotheses: {stage1_data['num_hypotheses']}")
 
     print("\nStep 2: Execute and Analyze...")
-    stage2_result = execute_and_analyze(stage1_data['plan_file'])
+    stage2_result = execute_and_analyze(stage1_data['proposal_file'])
     stage2_data = json.loads(stage2_result)
-    print(f"  ✓ Results file: {stage2_data['results_file']}")
-    print(f"  ✓ Findings: {stage2_data['num_findings']}")
+    print(f"  ✓ Workspace: {stage2_data['workspace']}")
     print(f"  ✓ Cost: ${stage2_data['cost_usd']:.4f}")
 
-    print("\nStep 3: Generate Report...")
+    print("\nStep 3: Generate Report (ACM PDF)...")
     stage3_result = report_and_write(
-        stage1_data['plan_file'],
-        stage1_data['citations_file'],
-        stage2_data['results_file']
+        stage1_data['proposal_file'],
+        stage2_data['workspace']
     )
     stage3_data = json.loads(stage3_result)
     print(f"  ✓ PDF: {stage3_data['pdf_path']}")
@@ -157,6 +169,31 @@ def example_5_programmatic_workflow():
     print("\n" + "="*70)
     print(f"Complete! Final PDF: {stage3_data['pdf_path']}")
     print("="*70)
+
+
+def example_6_matrix_subregion_sum():
+    """Example 6: Algorithmic research - find a rectangular region in a matrix with a target sum."""
+    print("\n" + "="*70)
+    print("Example 6: Matrix Rectangular Region Sum")
+    print("="*70 + "\n")
+
+    from main import ResearchAgent
+
+    agent = ResearchAgent(verbose=True)
+
+    task = (
+        "In a two-dimensional square matrix, find a rectangular region "
+        "such that the sum of the numbers within the region equals a "
+        "pre-given number. Research efficient algorithms for this problem, "
+        "implement at least a brute-force and an optimized approach using "
+        "prefix sums, compare their time complexity, and validate correctness "
+        "with test cases. Generate a research paper in PDF using the ACM template."
+    )
+    print(f"Task: {task}\n")
+
+    result = agent(task)
+
+    print(f"\nResult: {result}")
 
 
 def check_environment():
@@ -234,6 +271,7 @@ def main():
         print("  3 - Minimal configuration (quick)")
         print("  4 - Error handling")
         print("  5 - Programmatic workflow (step-by-step)")
+        print("  6 - Algorithmic: matrix rectangular region sum")
         print("\nExample:")
         print("  python example.py 1")
         print("  python example.py 0  # Check environment first")
@@ -248,6 +286,7 @@ def main():
         "3": ("Minimal Configuration", example_3_minimal_config),
         "4": ("Error Handling", example_4_with_error_handling),
         "5": ("Programmatic Workflow", example_5_programmatic_workflow),
+        "6": ("Matrix Rectangular Region Sum", example_6_matrix_subregion_sum),
     }
 
     if example_num not in examples:
