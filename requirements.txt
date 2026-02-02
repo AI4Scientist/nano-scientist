@@ -1,14 +1,11 @@
 # Mini Researcher Agent - PocketFlow Edition
-# ============================================================================
 #
-# Installation:
-#   pip install -r requirements.txt
-#   # OR with uv:
-#   uv sync
-#
-# Note: Tectonic (LaTeX engine) must be installed separately
-#   curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
-# ============================================================================
+# Setup:
+#   curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv
+#   uv sync                                           # install deps
+#   uv run install-tectonic                            # install LaTeX engine
+#   cp .env.example .env                               # add your API keys
+#   python example.py 5                                # run example
 
 # ============================================================================
 # Core Framework (replaces smolagents + mini-swe-agent)
@@ -50,12 +47,3 @@ seaborn>=0.13.0             # Statistical data visualization
 
 # Paper Writing Skill
 PyYAML>=6.0                 # YAML configuration parsing
-# Note: Tectonic binary required for PDF compilation
-
-# ============================================================================
-# Configuration & Utilities
-# ============================================================================
-# All scientific-skills dependencies included above
-# No smolagents, mini-swe-agent, litellm, or tavily-python needed
-
-# Estimated total size: ~50MB (vs 170MB previous)

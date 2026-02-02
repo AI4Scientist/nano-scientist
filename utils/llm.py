@@ -2,7 +2,6 @@
 import os
 import json
 import re
-import yaml
 from openai import OpenAI
 
 
@@ -23,18 +22,7 @@ def get_openrouter_client():
 
 
 def call_llm(prompt, model=None, max_tokens=4096, temperature=0.7):
-    """
-    Call OpenRouter API with given prompt
-
-    Args:
-        prompt: The prompt to send
-        model: Model to use (defaults to OPENROUTER_MODEL env var)
-        max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature
-
-    Returns:
-        str: The model's response text
-    """
+    """Call OpenRouter API with given prompt."""
     client = get_openrouter_client()
     model = model or os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
 
@@ -45,67 +33,217 @@ def call_llm(prompt, model=None, max_tokens=4096, temperature=0.7):
         messages=[{"role": "user", "content": prompt}],
         max_tokens=max_tokens,
         temperature=temperature,
-        timeout=120.0  # 2 minute timeout
+        timeout=120.0
     )
 
-    print("Done")
-    return response.choices[0].message.content
+    result = response.choices[0].message.content
+    finish_reason = response.choices[0].finish_reason
+    if finish_reason == "length":
+        print(f"Done (TRUNCATED - hit max_tokens={max_tokens})")
+    else:
+        print("Done")
+    return result
 
 
-def parse_structured(text):
-    """
-    Extract and parse structured data (JSON or YAML) from LLM response
+# ---------------------------------------------------------------------------
+# JSON parsing (for small control blocks)
+# ---------------------------------------------------------------------------
 
-    Tries JSON first (more reliable for prose-heavy output), then YAML.
+def _clean_json(json_str):
+    """Remove trailing commas before } and ] (common LLM mistake)."""
+    result = []
+    in_str = False
+    i = 0
+    while i < len(json_str):
+        c = json_str[i]
+        if c == '\\' and in_str:
+            result.append(c)
+            if i + 1 < len(json_str):
+                result.append(json_str[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        if not in_str and c == ',':
+            j = i + 1
+            while j < len(json_str) and json_str[j] in ' \t\n\r':
+                j += 1
+            if j < len(json_str) and json_str[j] in ('}', ']'):
+                i += 1
+                continue
+        result.append(c)
+        i += 1
+    return ''.join(result)
 
-    Args:
-        text: LLM response containing structured data
 
-    Returns:
-        dict: Parsed content
-    """
-    # Strategy 1: Try JSON code block
-    if "```json" in text:
-        json_str = text.split("```json")[1].split("```")[0].strip()
+def _extract_json_object(text, start=0):
+    """Extract a JSON object by tracking brace depth (handles ``` in strings)."""
+    pos = text.find('{', start)
+    if pos == -1:
+        return None
+
+    depth = 0
+    in_str = False
+    i = pos
+    while i < len(text):
+        c = text[i]
+        if c == '\\' and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        elif not in_str:
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[pos:i + 1]
+        i += 1
+    # Truncated - return from { to end
+    return text[pos:]
+
+
+def _repair_truncated_json(json_str):
+    """Close unclosed structures in truncated JSON."""
+    stripped = json_str.rstrip()
+
+    in_string = False
+    last_good = 0
+    i = 0
+    while i < len(stripped):
+        c = stripped[i]
+        if c == '\\' and in_string:
+            i += 2
+            continue
+        if c == '"':
+            in_string = not in_string
+        if not in_string:
+            last_good = i
+        i += 1
+
+    if in_string:
+        stripped = stripped[:last_good + 1]
+
+    stripped = stripped.rstrip()
+    while stripped and stripped[-1] in (',', ':'):
+        stripped = stripped[:-1].rstrip()
+
+    if stripped.endswith('"'):
+        pos = len(stripped) - 2
+        while pos >= 0:
+            if stripped[pos] == '"' and (pos == 0 or stripped[pos - 1] != '\\'):
+                break
+            pos -= 1
+        if pos >= 0:
+            before = stripped[:pos].rstrip()
+            if before and before[-1] in (',', '{'):
+                stripped = before.rstrip(',').rstrip()
+
+    stack = []
+    in_str = False
+    i = 0
+    while i < len(stripped):
+        c = stripped[i]
+        if c == '\\' and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        elif not in_str:
+            if c in ('{', '['):
+                stack.append(c)
+            elif c == '}':
+                if stack and stack[-1] == '{':
+                    stack.pop()
+            elif c == ']':
+                if stack and stack[-1] == '[':
+                    stack.pop()
+        i += 1
+
+    closers = ""
+    for opener in reversed(stack):
+        closers += '}' if opener == '{' else ']'
+    return stripped + closers
+
+
+def parse_json(text):
+    """Extract and parse JSON from LLM response (brace-depth tracking)."""
+    def _try(s):
         try:
-            return json.loads(json_str)
+            return json.loads(s)
         except json.JSONDecodeError:
             pass
-
-    # Strategy 2: Try YAML code block
-    if "```yaml" in text:
-        yaml_str = text.split("```yaml")[1].split("```")[0].strip()
         try:
-            return yaml.safe_load(yaml_str)
-        except yaml.YAMLError:
+            return json.loads(_clean_json(s))
+        except json.JSONDecodeError:
             pass
+        return None
 
-    # Strategy 3: Try any code block as JSON then YAML
-    if "```" in text:
-        block = text.split("```")[1].split("```")[0].strip()
-        # Remove language tag if present (e.g., "json\n{...}")
-        block = re.sub(r"^\w+\n", "", block)
-        try:
-            return json.loads(block)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        try:
-            return yaml.safe_load(block)
-        except yaml.YAMLError:
-            pass
+    start = 0
+    marker = text.find("```json")
+    if marker != -1:
+        start = marker + len("```json")
 
-    # Strategy 4: Try raw text as JSON then YAML
-    try:
-        return json.loads(text.strip())
-    except (json.JSONDecodeError, ValueError):
-        pass
-    try:
-        return yaml.safe_load(text.strip())
-    except yaml.YAMLError:
-        pass
+    json_str = _extract_json_object(text, start)
+    if json_str:
+        r = _try(json_str)
+        if r is not None:
+            return r
+        repaired = _repair_truncated_json(json_str)
+        if repaired:
+            r = _try(repaired)
+            if r is not None:
+                print("  [PARSE] Repaired JSON successfully")
+                return r
 
-    raise ValueError(f"Could not parse structured data from LLM response. First 200 chars: {text[:200]}")
+    if start > 0:
+        json_str = _extract_json_object(text, 0)
+        if json_str:
+            r = _try(json_str)
+            if r is not None:
+                return r
+            repaired = _repair_truncated_json(json_str)
+            if repaired:
+                r = _try(repaired)
+                if r is not None:
+                    return r
+
+    raise ValueError(f"Could not parse JSON. First 300 chars: {text[:300]}")
 
 
-# Keep backward compatibility
-parse_yaml = parse_structured
+# ---------------------------------------------------------------------------
+# Section-based response format: small JSON control + raw file content
+# ---------------------------------------------------------------------------
+# Format:
+#   ```json
+#   {"status": "done", "rounds_used": 1, "reasoning": "..."}
+#   ```
+#   ===FILE: filename.ext===
+#   raw content here (no escaping)
+#   ===FILE: another.ext===
+#   more content
+#   ===END===
+
+FILE_SECTION_RE = re.compile(r'===FILE:\s*(.+?)\s*===\n(.*?)(?=\n===FILE:|\n===END===|$)', re.DOTALL)
+
+
+def parse_response(text):
+    """
+    Parse LLM response in section-based format.
+
+    Returns:
+        dict with 'control' (parsed JSON) and 'files' (dict of filename->content)
+    """
+    control = parse_json(text)
+    files = {}
+    for match in FILE_SECTION_RE.finditer(text):
+        filename = match.group(1).strip()
+        content = match.group(2).strip()
+        files[filename] = content
+    return {"control": control, "files": files}
+
+
+# Backward compat
+parse_yaml = parse_json
+parse_structured = parse_json

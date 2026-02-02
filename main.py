@@ -14,20 +14,63 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from pocketflow import Flow, Node
-from utils.llm import call_llm, parse_yaml
+from utils.llm import call_llm, parse_json, parse_response
 from utils.skill_loader import get_skill_instructions
 from utils.docker_runner import run_experiment
 
 # Load environment variables
 load_dotenv()
-print("[DEBUG] Environment loaded")
-print(f"[DEBUG] API Key set: {bool(os.getenv('OPENROUTER_API_KEY'))}")
-print(f"[DEBUG] Model: {os.getenv('OPENROUTER_MODEL', 'not set')}")
 
 # Configuration
 ENABLE_DOCKER = os.getenv("ENABLE_DOCKER", "False").lower() == "true"
 DOCKER_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.13")
-print("[DEBUG] Configuration loaded")
+MAX_CONTEXT_CHARS = 3000
+
+# Per-stage budget allocation (fractions of max_rounds)
+STAGE_BUDGET = {
+    "survey": 0.15,       # 15% - literature survey
+    "method": 0.35,       # 35% - method implementation
+    "evaluation": 0.30,   # 30% - experimental evaluation
+    "paper": 0.20,        # 20% - paper writing (single pass)
+}
+# Max iterations per stage (hard cap regardless of budget)
+MAX_ITERATIONS = {"survey": 2, "method": 3, "evaluation": 2}
+
+# Response format instructions shared by all content-producing nodes
+RESPONSE_FORMAT = """
+RESPONSE FORMAT:
+1. First, output a small JSON control block (status, rounds_used, reasoning only - NO file content):
+```json
+{...}
+```
+2. Then output each file as a raw section (no JSON escaping needed):
+===FILE: filename.ext===
+raw content here
+===FILE: another.ext===
+more content
+===END===
+"""
+
+
+def truncate_context(data, max_chars=MAX_CONTEXT_CHARS):
+    """Truncate large data for prompt inclusion to avoid context overflow."""
+    text = json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... (truncated, {len(text)} total chars)"
+
+
+def summarize_files(files, max_per_file=500):
+    """Create a brief summary of file contents for prompt context."""
+    if not files:
+        return "(none)"
+    parts = []
+    for name, content in files.items():
+        preview = content[:max_per_file]
+        if len(content) > max_per_file:
+            preview += f"... ({len(content)} chars total)"
+        parts.append(f"[{name}]: {preview}")
+    return "\n".join(parts)
 
 
 # ============================================================================
@@ -51,11 +94,11 @@ Consider:
 3. Evaluation depth: Basic metrics vs ablations vs statistical tests
 4. Expected output: Brief document vs technical report vs conference paper
 
-Return JSON:
+Return JSON only:
 ```json
 {{
   "complexity": "low or medium or high",
-  "reasoning": "detailed explanation of why this classification",
+  "reasoning": "brief explanation",
   "max_rounds": 20,
   "expected_output": "brief or technical or conference"
 }}
@@ -64,26 +107,24 @@ Return JSON:
 max_rounds guide: 20 for low, 100 for medium, 300 for high.
 Be conservative - if uncertain, choose lower complexity.
 """
-        return call_llm(prompt)
+        return call_llm(prompt, max_tokens=1024)
 
     def post(self, shared, prep_res, exec_res):
         try:
-            result = parse_yaml(exec_res)
+            result = parse_json(exec_res)
             shared["complexity"] = result["complexity"]
             shared["max_rounds"] = result["max_rounds"]
             shared["expected_output"] = result.get("expected_output", "technical")
             shared["current_round"] = 0
-            shared["complexity_reasoning"] = result.get("reasoning", "")
 
             print(f"\n{'='*80}")
-            print(f"Complexity Classification:")
-            print(f"  Level: {result['complexity'].upper()}")
-            print(f"  Max Rounds: {result['max_rounds']}")
-            print(f"  Expected Output: {result.get('expected_output', 'technical')}")
-            print(f"  Reasoning: {result.get('reasoning', '')[:100]}...")
+            print(f"Complexity: {result['complexity'].upper()} | "
+                  f"Max Rounds: {result['max_rounds']} | "
+                  f"Output: {result.get('expected_output', 'technical')}")
+            print(f"Reasoning: {result.get('reasoning', '')[:100]}")
             print(f"{'='*80}\n")
         except Exception as e:
-            print(f"⚠️  Classification failed: {e}. Defaulting to medium complexity.")
+            print(f"⚠️  Classification failed: {e}. Defaulting to medium.")
             shared["complexity"] = "medium"
             shared["max_rounds"] = 100
             shared["expected_output"] = "technical"
@@ -100,7 +141,7 @@ class BudgetGuardNode(Node):
         self.stage_name = stage_name
 
     def exec(self, _):
-        pass  # No LLM call needed
+        pass
 
     def post(self, shared, prep_res, exec_res):
         current = shared["current_round"]
@@ -110,7 +151,7 @@ class BudgetGuardNode(Node):
             print(f"✓ Budget check passed: {current}/{max_rounds} rounds used")
             return "proceed"
         else:
-            print(f"⚠️  Budget exceeded at {self.stage_name}: {current}/{max_rounds} rounds")
+            print(f"⚠️  Budget exceeded at {self.stage_name}: {current}/{max_rounds}")
             shared["budget_exceeded"] = True
             shared["termination_stage"] = self.stage_name
             return "emergency_report"
@@ -124,66 +165,82 @@ class LiteratureSurveyNode(Node):
         self.skill = get_skill_instructions("scientific-skills/literature-survey/SKILL.md")
 
     def prep(self, shared):
+        stage_rounds = int(shared["max_rounds"] * STAGE_BUDGET["survey"])
+        iteration = shared.get("survey_iteration", 0)
         return {
             "skill": self.skill,
             "question": shared["question"],
-            "previous_output": shared.get("survey_output"),
-            "rounds_left": shared["max_rounds"] - shared["current_round"],
-            "iteration": shared.get("survey_iteration", 0)
+            "prev_files": shared.get("survey_files"),
+            "stage_rounds": stage_rounds,
+            "iteration": iteration,
+            "is_final": iteration + 1 >= MAX_ITERATIONS["survey"],
         }
 
     def exec(self, inputs):
+        prev_context = ""
+        if inputs["prev_files"]:
+            prev_context = f"Previous Output (refine if needed):\n{summarize_files(inputs['prev_files'])}"
+        else:
+            prev_context = "First iteration - start from scratch."
+
+        urgency = ""
+        if inputs["is_final"]:
+            urgency = "\n**THIS IS YOUR FINAL ITERATION. You MUST return status: done and deliver complete output.**\n"
+
         prompt = f"""Execute the literature survey skill:
 
 {inputs['skill']}
 
 Research Question: {inputs['question']}
-Budget Remaining: {inputs['rounds_left']} rounds
-Current Iteration: {inputs['iteration']}
+Stage Budget: {inputs['stage_rounds']} rounds (for this stage only)
+Current Iteration: {inputs['iteration']} of {MAX_ITERATIONS['survey']} max
+{urgency}
+{prev_context}
 
-{"Previous Output (refine if needed):" if inputs['previous_output'] else "First iteration - start from scratch."}
-{inputs['previous_output'] or ""}
+{RESPONSE_FORMAT}
 
-Return JSON:
-```json
-{{
-  "status": "continue or done",
-  "output": {{
-    "survey_report_md": "comprehensive markdown literature survey here",
-    "references_bib": "BibTeX bibliography here",
-    "key_papers": ["paper1", "paper2"]
-  }},
-  "rounds_used": 1,
-  "reasoning": "why continue or done"
-}}
-```
+JSON control block should contain:
+- "status": "continue" or "done"
+- "rounds_used": number (keep to 1)
+- "reasoning": "why continue or done"
+- "key_papers": ["paper1", "paper2"]
 
-IMPORTANT: Escape special characters in JSON strings (newlines as \\n, quotes as \\").
+File sections to include:
+===FILE: survey_report.md===  (comprehensive markdown literature survey)
+===FILE: references.bib===    (BibTeX bibliography)
+===END===
+
 If status is "done", ensure the survey is comprehensive and publication-ready.
+Prefer returning "done" with complete output over multiple iterations.
 """
         return call_llm(prompt, max_tokens=8192)
 
     def post(self, shared, prep_res, exec_res):
         try:
-            result = parse_yaml(exec_res)
+            resp = parse_response(exec_res)
+            ctrl = resp["control"]
+            files = resp["files"]
 
-            # Update outputs
-            shared["survey_output"] = result.get("output", {})
-            shared["current_round"] += result.get("rounds_used", 1)
+            shared["survey_files"] = files
+            shared["survey_control"] = ctrl
+            shared["current_round"] += ctrl.get("rounds_used", 1)
             shared["survey_iteration"] = shared.get("survey_iteration", 0) + 1
 
-            status = result.get("status", "done")
+            status = ctrl.get("status", "done")
+            if shared["survey_iteration"] >= MAX_ITERATIONS["survey"] and status == "continue":
+                print(f"   ⚠️  Max iterations reached, forcing done")
+                status = "done"
+
             print(f"\n📚 Literature Survey - Iteration {shared['survey_iteration']}")
-            print(f"   Status: {status}")
-            print(f"   Rounds used: {result.get('rounds_used', 1)}")
-            print(f"   Total rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Status: {status} | Rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Files: {list(files.keys())}")
 
             return status
         except Exception as e:
             print(f"⚠️  Literature survey failed: {e}")
-            shared["survey_output"] = {"error": str(e)}
-            shared["current_round"] += 5  # Penalty for failure
-            return "done"  # Force proceed even on error
+            shared["survey_files"] = {}
+            shared["current_round"] += 1
+            return "done"
 
 
 class MethodImplementationNode(Node):
@@ -194,65 +251,84 @@ class MethodImplementationNode(Node):
         self.skill = get_skill_instructions("scientific-skills/method-implementation/SKILL.md")
 
     def prep(self, shared):
+        stage_rounds = int(shared["max_rounds"] * STAGE_BUDGET["method"])
+        iteration = shared.get("method_iteration", 0)
         return {
             "skill": self.skill,
             "question": shared["question"],
-            "survey": shared.get("survey_output", {}),
-            "previous_output": shared.get("method_output"),
-            "rounds_left": shared["max_rounds"] - shared["current_round"],
-            "iteration": shared.get("method_iteration", 0)
+            "survey_files": shared.get("survey_files", {}),
+            "prev_files": shared.get("method_files"),
+            "stage_rounds": stage_rounds,
+            "iteration": iteration,
+            "is_final": iteration + 1 >= MAX_ITERATIONS["method"],
         }
 
     def exec(self, inputs):
+        survey_ctx = summarize_files(inputs["survey_files"])
+        prev_context = ""
+        if inputs["prev_files"]:
+            prev_context = f"Previous Output:\n{summarize_files(inputs['prev_files'])}"
+        else:
+            prev_context = "First iteration."
+
+        urgency = ""
+        if inputs["is_final"]:
+            urgency = "\n**THIS IS YOUR FINAL ITERATION. You MUST return status: done and deliver complete, working code.**\n"
+
         prompt = f"""Execute the method implementation skill:
 
 {inputs['skill']}
 
 Research Question: {inputs['question']}
-Literature Survey Results: {json.dumps(inputs['survey'], indent=2)}
-Budget Remaining: {inputs['rounds_left']} rounds
-Current Iteration: {inputs['iteration']}
+Literature Survey Summary: {survey_ctx}
+Stage Budget: {inputs['stage_rounds']} rounds (for this stage only)
+Current Iteration: {inputs['iteration']} of {MAX_ITERATIONS['method']} max
+{urgency}
+{prev_context}
 
-{"Previous Output:" if inputs['previous_output'] else "First iteration."}
-{json.dumps(inputs['previous_output'], indent=2) if inputs['previous_output'] else ""}
+{RESPONSE_FORMAT}
 
-Return JSON:
-```json
-{{
-  "status": "continue or done",
-  "output": {{
-    "design_md": "method design document here",
-    "code_files": [{{"filename": "main.py", "content": "code here"}}],
-    "requirements_txt": "dependencies here"
-  }},
-  "rounds_used": 1,
-  "reasoning": "why continue or done"
-}}
-```
+JSON control block should contain:
+- "status": "continue" or "done"
+- "rounds_used": number (keep to 1)
+- "reasoning": "why continue or done"
+- "requirements_txt": "pip dependencies, one per line"
 
-IMPORTANT: Escape special characters in JSON strings (newlines as \\n, quotes as \\").
+File sections to include:
+===FILE: design.md===         (method design document)
+===FILE: main.py===           (primary implementation code)
+(add more ===FILE: xxx.py=== sections for additional source files as needed)
+===END===
+
+Deliver ALL code in a single iteration when possible. Only use "continue" if the implementation genuinely needs more work.
 """
         return call_llm(prompt, max_tokens=8192)
 
     def post(self, shared, prep_res, exec_res):
         try:
-            result = parse_yaml(exec_res)
+            resp = parse_response(exec_res)
+            ctrl = resp["control"]
+            files = resp["files"]
 
-            shared["method_output"] = result.get("output", {})
-            shared["current_round"] += result.get("rounds_used", 1)
+            shared["method_files"] = files
+            shared["method_control"] = ctrl
+            shared["current_round"] += ctrl.get("rounds_used", 1)
             shared["method_iteration"] = shared.get("method_iteration", 0) + 1
 
-            status = result.get("status", "done")
+            status = ctrl.get("status", "done")
+            if shared["method_iteration"] >= MAX_ITERATIONS["method"] and status == "continue":
+                print(f"   ⚠️  Max iterations reached, forcing done")
+                status = "done"
+
             print(f"\n🔧 Method Implementation - Iteration {shared['method_iteration']}")
-            print(f"   Status: {status}")
-            print(f"   Rounds used: {result.get('rounds_used', 1)}")
-            print(f"   Total rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Status: {status} | Rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Files: {list(files.keys())}")
 
             return status
         except Exception as e:
             print(f"⚠️  Method implementation failed: {e}")
-            shared["method_output"] = {"error": str(e)}
-            shared["current_round"] += 5
+            shared["method_files"] = {}
+            shared["current_round"] += 1
             return "done"
 
 
@@ -264,91 +340,116 @@ class ExperimentalEvaluationNode(Node):
         self.skill = get_skill_instructions("scientific-skills/experimental-evaluation/SKILL.md")
 
     def prep(self, shared):
+        stage_rounds = int(shared["max_rounds"] * STAGE_BUDGET["evaluation"])
+        iteration = shared.get("evaluation_iteration", 0)
         return {
             "skill": self.skill,
             "question": shared["question"],
-            "method": shared.get("method_output", {}),
+            "method_files": shared.get("method_files", {}),
+            "method_control": shared.get("method_control", {}),
             "previous_results": shared.get("evaluation_output"),
-            "rounds_left": shared["max_rounds"] - shared["current_round"],
-            "iteration": shared.get("evaluation_iteration", 0)
+            "stage_rounds": stage_rounds,
+            "iteration": iteration,
+            "is_final": iteration + 1 >= MAX_ITERATIONS["evaluation"],
         }
 
     def exec(self, inputs):
-        # Generate experiment code
+        method_ctx = summarize_files(inputs["method_files"])
+        reqs = inputs["method_control"].get("requirements_txt", "")
+
+        urgency = ""
+        if inputs["is_final"]:
+            urgency = "\n**THIS IS YOUR FINAL ITERATION. You MUST return status: done and deliver complete experiment code.**\n"
+
         prompt = f"""Execute experimental evaluation:
 
 {inputs['skill']}
 
 Research Question: {inputs['question']}
-Method Implementation: {json.dumps(inputs['method'], indent=2)}
-Budget Remaining: {inputs['rounds_left']} rounds
-Current Iteration: {inputs['iteration']}
-
-Generate experiment code that will:
+Method Implementation Summary: {method_ctx}
+Known Dependencies: {reqs}
+Stage Budget: {inputs['stage_rounds']} rounds (for this stage only)
+Current Iteration: {inputs['iteration']} of {MAX_ITERATIONS['evaluation']} max
+{urgency}
+Generate self-contained experiment code that will:
 1. Run the implemented method
 2. Collect metrics
 3. Generate plots and tables
 
-Return JSON:
-```json
-{{
-  "status": "continue or done",
-  "experiment_code": {{
-    "experiment_py": "self-contained Python code here",
-    "requirements_txt": "dependencies here"
-  }},
-  "expected_outputs": ["results.csv", "figures/plot1.png"],
-  "rounds_used": 1,
-  "reasoning": "why continue or done"
-}}
-```
+{RESPONSE_FORMAT}
 
-IMPORTANT: Escape special characters in JSON strings (newlines as \\n, quotes as \\").
-The experiment code should be self-contained and save results to files.
+JSON control block should contain:
+- "status": "continue" or "done"
+- "rounds_used": number (keep to 1)
+- "reasoning": "why continue or done"
+- "expected_outputs": ["results.csv", "figures/plot1.png"]
+
+File sections to include:
+===FILE: experiment.py===      (self-contained experiment script)
+===FILE: requirements.txt===   (pip dependencies)
+===END===
+
+The experiment code must be fully self-contained and save all results to files.
+Deliver complete experiment code in a single iteration when possible.
 """
         response = call_llm(prompt, max_tokens=8192)
-        result = parse_yaml(response)
+        try:
+            resp = parse_response(response)
+        except ValueError as e:
+            print(f"  ⚠️  Eval parse error: {e}")
+            return json.dumps({"status": "done", "rounds_used": 1,
+                               "reasoning": "Failed to parse LLM response",
+                               "files": {}})
 
-        # Run experiment if code generated
-        if "experiment_code" in result:
+        ctrl = resp["control"]
+        files = resp["files"]
+
+        # Run experiment if code was generated
+        if "experiment.py" in files:
             print(f"\n🧪 Running experiment ({'Docker' if ENABLE_DOCKER else 'Local'})...")
-
             task_id = f"eval_{inputs['iteration']}"
             exec_result = run_experiment(
                 {
-                    "experiment_py": result["experiment_code"].get("experiment_py", ""),
-                    "requirements_txt": result["experiment_code"].get("requirements_txt", ""),
+                    "experiment_py": files["experiment.py"],
+                    "requirements_txt": files.get("requirements.txt", ""),
                     "task_id": task_id
                 },
                 mode="docker" if ENABLE_DOCKER else "local",
                 image=DOCKER_IMAGE
             )
-
-            result["experiment_output"] = exec_result
+            ctrl["experiment_output"] = exec_result
             print(f"   Exit code: {exec_result['exit_code']}")
             print(f"   Workspace: {exec_result['workspace']}")
 
-        return json.dumps(result)
+        # Pack control + files for post()
+        ctrl["_files"] = files
+        return json.dumps(ctrl, default=str)
 
     def post(self, shared, prep_res, exec_res):
         try:
             result = json.loads(exec_res)
+            files = result.pop("_files", {})
 
             shared["evaluation_output"] = result
+            shared["evaluation_files"] = files
             shared["current_round"] += result.get("rounds_used", 1)
             shared["evaluation_iteration"] = shared.get("evaluation_iteration", 0) + 1
 
             status = result.get("status", "done")
+            if shared["evaluation_iteration"] >= MAX_ITERATIONS["evaluation"] and status == "continue":
+                print(f"   ⚠️  Max iterations reached, forcing done")
+                status = "done"
+
             print(f"\n📊 Experimental Evaluation - Iteration {shared['evaluation_iteration']}")
-            print(f"   Status: {status}")
-            print(f"   Rounds used: {result.get('rounds_used', 1)}")
-            print(f"   Total rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Status: {status} | Rounds: {shared['current_round']}/{shared['max_rounds']}")
+            print(f"   Files: {list(files.keys())}")
 
             return status
         except Exception as e:
             print(f"⚠️  Experimental evaluation failed: {e}")
             shared["evaluation_output"] = {"error": str(e)}
-            shared["current_round"] += 5
+            shared["evaluation_files"] = {}
+            shared["current_round"] += 1
             return "done"
 
 
@@ -364,16 +465,16 @@ class PaperWritingNode(Node):
         return {
             "skill": self.skill,
             "question": shared["question"],
-            "survey": shared.get("survey_output", {}),
-            "method": shared.get("method_output", {}),
-            "evaluation": shared.get("evaluation_output", {}),
+            "survey_files": shared.get("survey_files", {}),
+            "method_files": shared.get("method_files", {}),
+            "evaluation_files": shared.get("evaluation_files", {}),
+            "evaluation_output": shared.get("evaluation_output", {}),
             "expected_output": shared.get("expected_output", "technical"),
-            "budget_exceeded": shared.get("budget_exceeded", False),
             "emergency": self.emergency
         }
 
     def exec(self, inputs):
-        mode = "EMERGENCY - Brief summary of completed work" if inputs["emergency"] else "Full paper"
+        mode = "EMERGENCY - Brief summary" if inputs["emergency"] else "Full paper"
 
         prompt = f"""Generate academic paper ({mode}):
 
@@ -383,43 +484,141 @@ Research Question: {inputs['question']}
 Expected Output Type: {inputs['expected_output']}
 
 Available Content:
-- Literature Survey: {json.dumps(inputs['survey'], indent=2)[:500]}...
-- Method: {json.dumps(inputs['method'], indent=2)[:500]}...
-- Evaluation: {json.dumps(inputs['evaluation'], indent=2)[:500]}...
+- Literature Survey: {summarize_files(inputs['survey_files'])}
+- Method: {summarize_files(inputs['method_files'])}
+- Evaluation: {summarize_files(inputs['evaluation_files'])}
+- Experiment Results: {truncate_context(inputs['evaluation_output'], 1000)}
 
-{"⚠️ EMERGENCY MODE: Budget exceeded. Generate brief summary paper with available results." if inputs['emergency'] else ""}
+{"EMERGENCY MODE: Budget exceeded. Generate brief summary with available results." if inputs['emergency'] else ""}
 
-Return JSON:
-```json
-{{
-  "paper": {{
-    "main_tex": "complete LaTeX paper using ACM template here",
-    "references_bib": "BibTeX bibliography here",
-    "title": "paper title",
-    "abstract": "paper abstract"
-  }}
-}}
-```
+{RESPONSE_FORMAT}
 
-IMPORTANT: Escape special characters in JSON strings (newlines as \\n, quotes as \\", backslashes as \\\\).
-Include all sections: Abstract, Introduction, Related Work, Method, Experiments, Conclusion.
+JSON control block should contain:
+- "title": "paper title"
+- "abstract": "paper abstract"
+
+File sections to include:
+===FILE: main.tex===         (complete LaTeX paper)
+===FILE: references.bib===   (BibTeX bibliography)
+===END===
+
+IMPORTANT LaTeX requirements (we compile with Tectonic/XeTeX):
+- Do NOT use \\usepackage[...]{{inputenc}} — XeTeX handles UTF-8 natively
+- Do NOT use \\usepackage[T1]{{fontenc}} — not needed with XeTeX
+- Use \\usepackage{{fontspec}} if custom fonts are needed (usually not required)
+- Standard packages (amsmath, graphicx, hyperref, booktabs, algorithm, listings, natbib, geometry) are fine
+
+Include all standard sections: Abstract, Introduction, Related Work, Method, Experiments, Conclusion.
 """
-        return call_llm(prompt, max_tokens=16384)
+        return call_llm(prompt, max_tokens=12000)
 
     def post(self, shared, prep_res, exec_res):
         try:
-            result = parse_yaml(exec_res)
-            shared["paper_output"] = result.get("paper", {})
+            resp = parse_response(exec_res)
+            ctrl = resp["control"]
+            files = resp["files"]
+
+            shared["paper_control"] = ctrl
+            shared["paper_files"] = files
 
             print(f"\n📄 Paper Writing Complete")
-            print(f"   Title: {result.get('paper', {}).get('title', 'Untitled')}")
-            print(f"   Mode: {'Emergency (partial results)' if self.emergency else 'Full paper'}")
+            print(f"   Title: {ctrl.get('title', 'Untitled')}")
+            print(f"   Files: {list(files.keys())}")
+            print(f"   Mode: {'Emergency' if self.emergency else 'Full paper'}")
 
             return "default"
         except Exception as e:
             print(f"⚠️  Paper writing failed: {e}")
-            shared["paper_output"] = {"error": str(e)}
+            shared["paper_files"] = {}
             return "default"
+
+
+def compile_latex(paper_dir):
+    """
+    Compile LaTeX to PDF. Priority: tectonic > pdflatex > Docker.
+    Returns True if PDF was generated.
+    """
+    import subprocess
+    import shutil
+
+    tex_file = paper_dir / "main.tex"
+    if not tex_file.exists():
+        return False
+
+    # Pre-process: patch LaTeX for Tectonic/XeTeX compatibility
+    tex_content = tex_file.read_text()
+    import re as _re
+    # Remove inputenc (XeTeX handles UTF-8 natively)
+    patched = _re.sub(r'\\usepackage\[.*?\]\{inputenc\}\s*\n?', '', tex_content)
+    # Remove T1 fontenc (not needed with XeTeX)
+    patched = _re.sub(r'\\usepackage\[T1\]\{fontenc\}\s*\n?', '', patched)
+    if patched != tex_content:
+        tex_file.write_text(patched)
+
+    # 1. Try Tectonic (preferred - single binary, auto-downloads packages)
+    tectonic_bin = shutil.which("tectonic") or str(Path.home() / ".local/bin/tectonic")
+    if Path(tectonic_bin).exists():
+        print("  Compiling LaTeX (tectonic)...")
+        try:
+            result = subprocess.run(
+                [tectonic_bin, "main.tex"],
+                cwd=paper_dir, capture_output=True, text=True, timeout=300
+            )
+            if (paper_dir / "main.pdf").exists():
+                print("  PDF generated successfully (tectonic)")
+                return True
+            else:
+                print(f"  Tectonic failed: {result.stderr[-500:]}")
+        except subprocess.TimeoutExpired:
+            print("  Tectonic timed out")
+
+    # 2. Try local pdflatex
+    if shutil.which("pdflatex"):
+        print("  Compiling LaTeX (pdflatex)...")
+        try:
+            for _ in range(2):
+                subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                    cwd=paper_dir, capture_output=True, timeout=120
+                )
+            if shutil.which("bibtex") and (paper_dir / "references.bib").exists():
+                subprocess.run(["bibtex", "main"], cwd=paper_dir, capture_output=True, timeout=60)
+                subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                    cwd=paper_dir, capture_output=True, timeout=120
+                )
+            if (paper_dir / "main.pdf").exists():
+                print("  PDF generated successfully (pdflatex)")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # 3. Try Docker
+    if ENABLE_DOCKER or shutil.which("docker"):
+        print("  Compiling LaTeX (Docker texlive)...")
+        try:
+            vol = str(paper_dir.resolve())
+            cmd = (
+                "pdflatex -interaction=nonstopmode -halt-on-error main.tex && "
+                "bibtex main 2>/dev/null; "
+                "pdflatex -interaction=nonstopmode -halt-on-error main.tex && "
+                "pdflatex -interaction=nonstopmode -halt-on-error main.tex"
+            )
+            subprocess.run(
+                ["docker", "run", "--rm", "-v", f"{vol}:/work", "-w", "/work",
+                 "texlive/texlive:latest", "bash", "-c", cmd],
+                capture_output=True, timeout=300
+            )
+            if (paper_dir / "main.pdf").exists():
+                print("  PDF generated successfully (Docker)")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    print("  ⚠️  Could not compile PDF.")
+    print("  Install: python3 utils/install_tectonic.py")
+    print("  Or manual: cd paper/ && tectonic main.tex")
+    return False
 
 
 class SaveArtifactsNode(Node):
@@ -430,54 +629,39 @@ class SaveArtifactsNode(Node):
         self.stage_name = stage_name
 
     def exec(self, inputs):
-        pass  # No LLM call
+        pass
 
     def post(self, shared, prep_res, exec_res):
-        # Reuse the single output directory created at pipeline start
         output_dir = Path(shared["output_dir"])
 
-        # Save full state snapshot
+        # Save full state snapshot (exclude large file content)
         state_file = output_dir / "state.json"
+        state_keys = ["question", "complexity", "max_rounds", "current_round",
+                      "expected_output", "start_time", "output_dir",
+                      "survey_control", "method_control", "evaluation_output",
+                      "paper_control", "budget_exceeded", "termination_stage"]
+        state = {k: shared[k] for k in state_keys if k in shared}
         with open(state_file, "w") as f:
-            json_safe_shared = {k: str(v) if isinstance(v, Path) else v
-                              for k, v in shared.items()}
-            json.dump(json_safe_shared, f, indent=2, default=str)
+            json.dump(state, f, indent=2, default=str)
 
-        # Save stage-specific outputs
-        if "survey_output" in shared and self.stage_name == "survey":
-            survey_dir = output_dir / "survey"
-            survey_dir.mkdir(exist_ok=True)
-            survey = shared["survey_output"]
-            if isinstance(survey, dict):
-                if "survey_report_md" in survey:
-                    (survey_dir / "survey_report.md").write_text(survey["survey_report_md"])
-                if "references_bib" in survey:
-                    (survey_dir / "references.bib").write_text(survey["references_bib"])
+        # Save files from the relevant stage
+        stage_files_key = f"{self.stage_name}_files"
+        files = shared.get(stage_files_key, {})
 
-        if "method_output" in shared and self.stage_name == "method":
-            method_dir = output_dir / "method"
-            method_dir.mkdir(exist_ok=True)
-            method = shared["method_output"]
-            if isinstance(method, dict):
-                if "design_md" in method:
-                    (method_dir / "design.md").write_text(method["design_md"])
-                if "code_files" in method:
-                    code_dir = method_dir / "code"
-                    code_dir.mkdir(exist_ok=True)
-                    for code_file in method["code_files"]:
-                        (code_dir / code_file["filename"]).write_text(code_file["content"])
+        if files:
+            stage_dir = output_dir / self.stage_name
+            stage_dir.mkdir(exist_ok=True)
+            for filename, content in files.items():
+                filepath = stage_dir / filename
+                filepath.parent.mkdir(parents=True, exist_ok=True)
+                filepath.write_text(content)
 
-        if "paper_output" in shared and self.stage_name == "paper":
+        # Compile LaTeX to PDF for paper stage
+        if self.stage_name == "paper" and files:
             paper_dir = output_dir / "paper"
-            paper_dir.mkdir(exist_ok=True)
-            paper = shared["paper_output"]
-            if isinstance(paper, dict):
-                if "main_tex" in paper:
-                    (paper_dir / "main.tex").write_text(paper["main_tex"])
-                if "references_bib" in paper:
-                    (paper_dir / "references.bib").write_text(paper["references_bib"])
+            compile_latex(paper_dir)
 
-        print(f"💾 Saved {self.stage_name} artifacts to: {output_dir}")
+        print(f"💾 Saved {self.stage_name} artifacts ({len(files)} files) to: {output_dir}")
 
         return "default"
 
@@ -489,7 +673,6 @@ class SaveArtifactsNode(Node):
 def create_research_pipeline():
     """Build the complete research pipeline flow"""
 
-    # Initialize all nodes
     classify = ClassifyComplexityNode()
 
     guard1 = BudgetGuardNode("literature_survey")
@@ -508,32 +691,27 @@ def create_research_pipeline():
     emergency_paper = PaperWritingNode(emergency=True)
     save_final = SaveArtifactsNode("paper")
 
-    # Build flow with budget guards and self-loops
     pipeline = Flow(start=classify)
 
-    # Stage 1: Literature Survey
     classify >> guard1
     guard1 - "proceed" >> survey
     guard1 - "emergency_report" >> emergency_paper
 
-    survey - "continue" >> survey  # Self-loop for refinement
+    survey - "continue" >> survey
     survey - "done" >> save1 >> guard2
 
-    # Stage 2: Method Implementation
     guard2 - "proceed" >> method
     guard2 - "emergency_report" >> emergency_paper
 
-    method - "continue" >> method  # Self-loop
+    method - "continue" >> method
     method - "done" >> save2 >> guard3
 
-    # Stage 3: Experimental Evaluation
     guard3 - "proceed" >> evaluation
     guard3 - "emergency_report" >> emergency_paper
 
-    evaluation - "continue" >> evaluation  # Self-loop
+    evaluation - "continue" >> evaluation
     evaluation - "done" >> save3 >> paper
 
-    # Final output
     paper >> save_final
     emergency_paper >> save_final
 
@@ -545,8 +723,6 @@ def create_research_pipeline():
 # ============================================================================
 
 def main():
-    """Main entry point for research agent"""
-
     if len(sys.argv) < 2:
         print("Usage: python main.py '<research question>'")
         print("\nExample:")
@@ -562,7 +738,6 @@ def main():
     print(f"Docker Mode: {'Enabled' if ENABLE_DOCKER else 'Disabled (local)'}")
     print(f"Model: {os.getenv('OPENROUTER_MODEL', 'anthropic/claude-haiku-4.5')}")
 
-    # Initialize shared state with a single output directory for the entire task
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     question_hash = abs(hash(question)) % 10000
     output_dir = Path(f"research_outputs/{timestamp}_{question_hash}")
@@ -574,12 +749,10 @@ def main():
         "output_dir": str(output_dir)
     }
 
-    # Create and run pipeline
     try:
         pipeline = create_research_pipeline()
-        result = pipeline.run(shared)
+        pipeline.run(shared)
 
-        # Print final summary
         print(f"\n{'='*80}")
         print("Research Complete!")
         print(f"{'='*80}")
@@ -588,7 +761,7 @@ def main():
         print(f"Output Directory: {shared.get('output_dir', 'N/A')}")
 
         if shared.get("budget_exceeded"):
-            print(f"\n⚠️  Budget exceeded at stage: {shared.get('termination_stage', 'unknown')}")
+            print(f"\n⚠️  Budget exceeded at: {shared.get('termination_stage', 'unknown')}")
             print("   Emergency paper generated with partial results.")
 
         print(f"\n{'='*80}\n")
