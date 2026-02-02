@@ -12,7 +12,11 @@ def get_openrouter_client():
 
     return OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=api_key
+        api_key=api_key,
+        default_headers={
+            "HTTP-Referer": "https://github.com/mini-researcher-agent",
+            "X-Title": "Mini Researcher Agent"
+        }
     )
 
 
@@ -30,15 +34,19 @@ def call_llm(prompt, model=None, max_tokens=4096, temperature=0.7):
         str: The model's response text
     """
     client = get_openrouter_client()
-    model = model or os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+    model = model or os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
+
+    print(f"[API] Calling {model}... ", end="", flush=True)
 
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=max_tokens,
-        temperature=temperature
+        temperature=temperature,
+        timeout=120.0  # 2 minute timeout
     )
 
+    print("Done")
     return response.choices[0].message.content
 
 

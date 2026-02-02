@@ -35,7 +35,7 @@ docker>=7.0.0               # Optional: For isolated experiments (ENABLE_DOCKER=
 # Literature Survey Skill
 arxiv>=2.1.0                # arXiv API client
 beautifulsoup4>=4.12.0      # HTML parsing for web scraping
-bibtexparser>=1.4.0         # BibTeX file parsing and generation
+bibtexparser>=2.0.0b9       # BibTeX file parsing and generation (v2 beta)
 
 # Method Implementation Skill
 gitpython>=3.1.0            # Git provenance tracking

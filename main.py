@@ -20,10 +20,14 @@ from utils.docker_runner import run_experiment
 
 # Load environment variables
 load_dotenv()
+print("[DEBUG] Environment loaded")
+print(f"[DEBUG] API Key set: {bool(os.getenv('OPENROUTER_API_KEY'))}")
+print(f"[DEBUG] Model: {os.getenv('OPENROUTER_MODEL', 'not set')}")
 
 # Configuration
 ENABLE_DOCKER = os.getenv("ENABLE_DOCKER", "False").lower() == "true"
 DOCKER_IMAGE = os.getenv("DOCKER_IMAGE", "python:3.13")
+print("[DEBUG] Configuration loaded")
 
 
 # ============================================================================
@@ -51,7 +55,7 @@ Return YAML:
 ```yaml
 complexity: low|medium|high
 reasoning: <detailed explanation of why this classification>
-max_rounds: <20 for low, 120 for medium, 250 for high>
+max_rounds: <20 for low, 100 for medium, 300 for high>
 expected_output: brief|technical|conference
 ```
 
@@ -78,7 +82,7 @@ Be conservative - if uncertain, choose lower complexity.
         except Exception as e:
             print(f"⚠️  Classification failed: {e}. Defaulting to medium complexity.")
             shared["complexity"] = "medium"
-            shared["max_rounds"] = 120
+            shared["max_rounds"] = 100
             shared["expected_output"] = "technical"
             shared["current_round"] = 0
 
@@ -555,7 +559,7 @@ def main():
     print(f"{'='*80}")
     print(f"\nResearch Question: {question}")
     print(f"Docker Mode: {'Enabled' if ENABLE_DOCKER else 'Disabled (local)'}")
-    print(f"Model: {os.getenv('OPENROUTER_MODEL', 'anthropic/claude-3.5-sonnet')}")
+    print(f"Model: {os.getenv('OPENROUTER_MODEL', 'anthropic/claude-haiku-4.5')}")
 
     # Initialize shared state
     shared = {

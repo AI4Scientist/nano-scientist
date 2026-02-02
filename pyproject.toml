@@ -3,7 +3,7 @@ name = "mini-researcher-agent"
 version = "0.1.0"
 description = "A minimalist self-evolving research agent with 3-stage pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     # Core dependencies
     "litellm>=1.0.0",
@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.scripts]
-install-tectonic = "src.install_tectonic:main"
+install-tectonic = "utils.install_tectonic:main"
 
 [tool.uv]
 # Tectonic (LaTeX engine) must be installed separately as a system binary
@@ -41,7 +41,7 @@ install-tectonic = "src.install_tectonic:main"
 # Or manually: curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
 
 [tool.setuptools]
-packages = ["src"]
+packages = ["utils"]
 py-modules = ["install_tectonic"]
 
 [build-system]
