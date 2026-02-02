@@ -121,7 +121,7 @@ template = load_template(venue="neurips")
 
 ### Phase 3: LLM-Powered Synthesis
 
-**Enhanced Prompt** (fixes Stage 3 issues):
+**Enhanced Prompt**:
 ```python
 prompt = f"""You are an expert academic researcher writing a {venue} paper.
 
@@ -132,6 +132,73 @@ CRITICAL REQUIREMENTS:
 4. **Complexity Analysis**: Provide Big-O notation where relevant
 5. **Code Availability**: Mention reproducibility artifacts
 
+WRITING QUALITY REQUIREMENTS (MANDATORY — read carefully):
+
+You are writing a SCIENTIFIC PAPER, not a technical report or user manual.
+Every section must read as connected, argumentative prose.
+
+**Prose-First Rule**: Write in flowing paragraphs. Each paragraph should
+have a topic sentence, develop an argument, and transition to the next.
+Bullet points and numbered lists are FORBIDDEN except in these cases:
+  - A "Contributions" list in the Introduction (max 3-4 items)
+  - Algorithm pseudocode (use \\begin{{algorithm}} environment)
+  - Items in a formal table
+Lists must NEVER replace paragraph prose for explanations, observations,
+interpretations, discussions, or proof steps.
+
+**Narrative Flow**: The paper must tell a coherent story:
+  - Introduction: Set up the question, build tension ("Can we do better?"),
+    then resolve it with your contribution. End with a brief roadmap sentence,
+    NOT a subsection called "Paper Organization."
+  - Each section must open by connecting to what came before and close by
+    motivating what comes next.
+  - Avoid mechanical transitions ("The remainder of this paper is organized
+    as follows. Section 2 does X. Section 3 does Y."). Instead, weave the
+    roadmap into the narrative naturally.
+
+**Proof Writing**: Mathematical proofs MUST be written as continuous
+reasoning in paragraph form, not as numbered step lists. Use words like
+"observe that," "it follows that," "since," "by combining" to connect
+logical steps. Reserve \\begin{{enumerate}} for definitions with multiple
+formal conditions, not for proof steps.
+
+**Result Interpretation**: When discussing experimental results, do NOT
+produce a numbered list of "Key Observations." Instead, write paragraphs
+that interpret the data, explain WHY results look the way they do, connect
+findings to the theoretical claims, and note surprises or confirmations.
+Weave table/figure references into the prose naturally.
+
+**Discussion Section**: Must synthesize and argue, not list. Each paragraph
+should develop one insight in depth — its implication, its connection to
+prior work, its limitations. Never write a subsection that is just a
+bulleted list of points.
+
+**Section Naming**: Use descriptive names that convey content. Avoid
+generic headings like "Main Results" or "Implications." Prefer headings
+that hint at the finding, e.g., "MergeSort Achieves the Information-
+Theoretic Bound" or "Limitations of the Comparison Model."
+
+**Sentences and Paragraphs**:
+  - Vary sentence length. Mix short declarative sentences with longer
+    ones that develop nuance.
+  - Each paragraph should be 4-8 sentences. Single-sentence paragraphs
+    are almost always wrong in a paper.
+  - Avoid starting consecutive sentences with the same word.
+  - Do not use bold text inside running prose to label sub-points
+    (e.g., "\\textbf{{Tightness}}: MergeSort achieves..."). This is
+    a disguised list. Write a real paragraph instead.
+
+**What NOT to Write**:
+  - "The significance of this result cannot be overstated:" followed by
+    a list. → Write a paragraph explaining WHY it matters.
+  - "This paper makes the following contributions:" followed by 5 items
+    with bold labels. → Keep the list short (3-4 items), one line each,
+    no bold-label-colon pattern.
+  - "Key Observations:" followed by numbered items. → Write paragraphs.
+  - Subsections that contain only a single list and nothing else.
+  - "Future Work" as a numbered list of topics. → Write a paragraph
+    discussing the most promising 2-3 directions with reasoning.
+
 INPUT ARTIFACTS:
 - Literature Survey: {related_work[:3000]}
 - Method Implementation: {method_description}
@@ -140,45 +207,29 @@ INPUT ARTIFACTS:
 
 PAPER STRUCTURE (for {venue}):
 
-## Abstract (250 words)
-- Problem statement (1-2 sentences)
-- Proposed solution (2-3 sentences)
-- Key results (2-3 sentences with numbers)
+Abstract (250 words): State the problem, the approach, and the key
+quantitative result — all in a single flowing paragraph.
 
-## Introduction
-- Motivation: Why is this problem important?
-- Limitations of existing work (from literature survey)
-- Our contribution: What's novel?
-- Paper organization
+Introduction: Motivate the problem, situate it in the literature, state
+your contribution clearly, and preview the paper structure in one sentence.
 
-## Related Work
-- Synthesize from literature_review.md
-- Group by themes (not chronological)
-- Clearly differentiate our work
-- Use citations: \\cite{{key}}
+Related Work: Group by intellectual themes. For each theme, write a
+paragraph synthesizing multiple papers and explaining how your work
+differs. Do not list papers one by one.
 
-## Method
-- Algorithm description with pseudocode
-- Complexity analysis (time/space)
-- Implementation details (language, frameworks)
-- Design choices and justifications
+Method: Describe the approach as a narrative. Use formal definitions,
+theorems, and proofs in paragraph form. Include pseudocode via the
+algorithm environment when helpful, but surround it with explanatory
+prose.
 
-## Experiments
-- Datasets and baselines (from evaluation_report.md)
-- Experimental setup (seeds, hardware)
-- Main results (tables with error bars)
-- Ablation studies
-- Statistical significance (p-values)
+Experiments: Describe setup in prose. Present results with tables and
+figures, but interpret them in paragraphs — do not just list observations.
 
-## Discussion
-- Interpretation of results
-- Limitations and failure cases
-- Broader impact
-- Future work
+Discussion: Synthesize insights, connect back to the introduction's
+question, discuss limitations honestly in prose paragraphs.
 
-## Conclusion
-- Summary of contributions
-- Key takeaways
+Conclusion: A concise paragraph summarizing the contribution and its
+significance. No lists.
 
 OUTPUT FORMAT:
 Generate valid JSON with sections:
@@ -197,6 +248,8 @@ IMPORTANT:
 - Reference figures: \\ref{{fig:results}}
 - Reference tables: \\ref{{tab:comparison}}
 - NO markdown formatting (use LaTeX commands)
+- NO \\begin{{itemize}} or \\begin{{enumerate}} except for the contributions
+  list in the introduction and formal definitions
 """
 ```
 
@@ -517,24 +570,165 @@ def verify_citation_arxiv(arxiv_id):
 
 ---
 
-## Quality Standards
+## Writing Quality Standards
 
-Every generated paper must:
-- ✅ **100% verified citations** (zero hallucinations)
-- ✅ **Compiles without errors** (LaTeX → PDF)
-- ✅ **Quantitative results** (numbers from evaluation_report.md)
-- ✅ **Complexity analysis** (Big-O notation)
-- ✅ **Proper figures** (all referenced, high DPI)
-- ✅ **Error bars** on experimental results
-- ✅ **Reproducibility info** (code, data, hyperparameters)
+A generated paper must read like a real submission to the target venue — not like a technical report, textbook chapter, or user manual. The following standards are non-negotiable.
+
+### Prose Over Lists
+
+Academic papers communicate through argumentative prose. Lists fragment reasoning into disconnected fragments and destroy logical flow.
+
+**Allowed list usage** (exhaustive):
+| Context | Format | Example |
+|---------|--------|---------|
+| Contributions in Introduction | Short `enumerate` (3-4 items, one line each) | "We make three contributions: (1) ..., (2) ..., (3) ..." |
+| Pseudocode | `algorithm` environment | `\begin{algorithm}...\end{algorithm}` |
+| Table cells | Tabular content | `\begin{tabular}...\end{tabular}` |
+| Formal definitions with conditions | `enumerate` for numbered conditions | Definition with conditions (i), (ii), (iii) |
+
+**Forbidden list usage**: Everything else. Specifically:
+- Proof steps must be continuous reasoning, not numbered items
+- Experimental observations must be interpretive paragraphs, not "Key Observations: 1, 2, 3"
+- Discussion points must be developed paragraphs, not bullet summaries
+- Future work must be a narrative paragraph, not a wish list
+- "Motivation and Significance" must be a paragraph, not an enumeration
+- Related work must synthesize papers thematically in paragraphs, not list them
+
+### Logical Flow and Transitions
+
+Each section must connect to the one before it and motivate the one after it. The paper should have a narrative arc:
+
+1. **Introduction** poses a question and creates intellectual tension
+2. **Related Work** shows what has been tried and what gap remains
+3. **Method** resolves the tension by presenting the approach
+4. **Experiments** provides evidence that the approach works
+5. **Discussion** reflects on what the evidence means
+6. **Conclusion** closes the arc
+
+Between sections and within sections, use transitional sentences: "Having established the theoretical bound, we now turn to empirical validation." Avoid mechanical transitions like "Section 3 describes X."
+
+### Paragraph Construction
+
+Each paragraph must:
+- Open with a topic sentence stating the paragraph's point
+- Develop the point with evidence, reasoning, or examples (4-8 sentences)
+- Close with a sentence that either concludes the point or transitions to the next paragraph
+
+Avoid: single-sentence paragraphs, paragraphs that are just a setup line for a list, paragraphs where every sentence starts with the same word.
+
+### Proof and Theorem Presentation
+
+Present proofs as continuous mathematical reasoning:
+
+```latex
+% BAD: Numbered step list
+\begin{enumerate}
+  \item \textbf{Number of Outputs}: There are $N!$ permutations...
+  \item \textbf{Information Content}: Each comparison yields 1 bit...
+  \item \textbf{Lower Bound}: Therefore we need $\log_2(N!)$...
+\end{enumerate}
+
+% GOOD: Flowing proof
+\begin{proof}
+Consider the set of all $N!$ permutations of the input. A correct
+sorting algorithm must distinguish among all of these, producing
+a unique output for each. Since each comparison has two outcomes
+($<$ or $>$ for distinct elements), it reveals at most one bit of
+information. To distinguish among $N!$ possibilities, we therefore
+require at least $\log_2(N!)$ comparisons. Applying Stirling's
+approximation, $\log_2(N!) = N\log_2 N - N\log_2 e + O(\log N)$,
+which gives the $\Omega(N \log N)$ lower bound.
+\end{proof}
+```
+
+### Result Interpretation
+
+When presenting experimental results, do not just list what the numbers show. Explain *why* the numbers look the way they do and what they mean for the paper's thesis:
+
+```latex
+% BAD: Observation list
+\textbf{Key Observations}:
+\begin{enumerate}
+  \item MergeSort achieves the lower bound...
+  \item HeapSort stays within $2\times$...
+  \item InsertionSort exceeds the bound...
+\end{enumerate}
+
+% GOOD: Interpretive prose
+Table~\ref{tab:results} reveals a striking pattern. MergeSort's
+comparison count matches the theoretical lower bound to within
+rounding error for $N \geq 1000$, providing direct empirical
+confirmation that the information-theoretic bound is tight.
+HeapSort, while asymptotically optimal, consistently uses roughly
+twice the minimum number of comparisons — a consequence of its
+heap-maintenance overhead during the extraction phase. The contrast
+with InsertionSort is dramatic: its ratio to the lower bound grows
+linearly with $N$, reflecting the $O(N^2)$ worst case and
+underscoring precisely why the $\Omega(N \log N)$ bound matters
+for practical algorithm selection.
+```
+
+### Technical Quality
+
+Every generated paper must also satisfy:
+- **100% verified citations** (zero hallucinations)
+- **Compiles without errors** (LaTeX → PDF)
+- **Quantitative results** (numbers from evaluation_report.md)
+- **Complexity analysis** (Big-O notation where relevant)
+- **Proper figures** (all referenced, high DPI)
+- **Error bars** on experimental results
+- **Reproducibility info** (code, data, hyperparameters)
 
 ---
 
 ## Common Pitfalls
 
-### ❌ Avoid
+### ❌ Writing Style Pitfalls (Most Common)
 
-**1. Hallucinated Citations**
+**1. List-itis: Replacing prose with bullet points**
+The single most common failure. Every observation, every discussion point, every proof step gets turned into an `\begin{enumerate}` or `\begin{itemize}`. The result reads like lecture notes, not a paper. If you find yourself writing `\begin{itemize}` outside of the allowed contexts (see Writing Quality Standards), stop and rewrite as a paragraph.
+
+**2. Bold-label-colon pattern as disguised lists**
+```latex
+% BAD: Disguised list in running text
+\textbf{Tightness}: MergeSort achieves the lower bound.
+\textbf{Universality}: The bound applies across families.
+\textbf{Scalability}: Results hold from 100 to 10,000.
+
+% GOOD: Real paragraph
+The experimental results confirm three aspects of the
+theoretical bound. First, MergeSort achieves the lower bound
+exactly, demonstrating tightness. The bound also proves
+universal across algorithm families...
+```
+
+**3. Missing transitions between sections**
+Sections that start cold without connecting to what came before. Every section opening should acknowledge the preceding discussion and explain why the reader is now moving to this topic.
+
+**4. "Paper Organization" subsections**
+A mechanical list of "Section 2 does X, Section 3 does Y" wastes space and bores reviewers. Weave the roadmap into the introduction's final paragraph naturally.
+
+**5. Future Work as a wish list**
+```latex
+% BAD:
+\begin{enumerate}
+  \item Parallel sorting bounds
+  \item Adaptive sorting
+  \item Approximate sorting
+  \item Quantum sorting
+\end{enumerate}
+
+% GOOD:
+The most promising extension concerns parallel sorting, where
+the relationship between depth and total work remains poorly
+understood. Adaptive sorting also merits investigation: while
+Timsort exploits existing order in practice, tight lower bounds
+for various measures of presortedness are still open...
+```
+
+### ❌ Technical Pitfalls
+
+**6. Hallucinated Citations**
 ```latex
 % BAD: Made-up paper
 \\cite{smith2024efficient}  % This paper doesn't exist!
@@ -543,7 +737,7 @@ Every generated paper must:
 \\cite{vaswani2017attention}  % Transformer paper, verified
 ```
 
-**2. Markdown in LaTeX**
+**7. Markdown in LaTeX**
 ```latex
 % BAD:
 **Our method** achieves #1 results
@@ -552,7 +746,7 @@ Every generated paper must:
 \\textbf{Our method} achieves \\#1 results
 ```
 
-**3. Missing Error Bars**
+**8. Missing Error Bars**
 ```latex
 % BAD:
 Our method: 94.2\\%
@@ -561,7 +755,7 @@ Our method: 94.2\\%
 Our method: $94.2 \\pm 0.3\\%$
 ```
 
-**4. No Statistical Tests**
+**9. No Statistical Tests**
 ```latex
 % BAD:
 "significantly better"
