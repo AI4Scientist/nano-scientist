@@ -292,11 +292,50 @@ Generate valid JSON with sections:
 IMPORTANT:
 - Use \\cite{{refX}} for citations (keys: {citation_keys})
 - Include \\begin{{algorithm}} blocks for pseudocode
-- Reference figures: \\ref{{fig:results}}
-- Reference tables: \\ref{{tab:comparison}}
 - NO markdown formatting (use LaTeX commands)
 - NO \\begin{{itemize}} or \\begin{{enumerate}} except for the contributions
   list in the introduction and formal definitions
+
+FIGURE AND TABLE CROSS-REFERENCE RULES (MANDATORY):
+Every \\ref must have a matching \\label, and vice versa. Broken
+cross-references (producing "??" in the PDF) are unacceptable.
+
+1. **Label placement**: \\label MUST come AFTER \\caption inside every
+   figure/table environment. Placing \\label before \\caption produces
+   wrong numbering. Correct order:
+   \\begin{{table}}[h]
+     \\centering
+     \\begin{{tabular}}...\\end{{tabular}}
+     \\caption{{Description here.}}
+     \\label{{tab:my_table}}
+   \\end{{table}}
+
+2. **Naming convention**: Use prefixes consistently:
+   - Tables: \\label{{tab:name}} and \\ref{{tab:name}}
+   - Figures: \\label{{fig:name}} and \\ref{{fig:name}}
+   - Algorithms: \\label{{alg:name}} and \\ref{{alg:name}}
+   - Equations: \\label{{eq:name}} and \\ref{{eq:name}}
+   - Sections: \\label{{sec:name}} and \\ref{{sec:name}}
+
+3. **No dangling references**: Before finalizing, verify that EVERY
+   \\ref{{X}} in the text has a corresponding \\label{{X}} defined
+   somewhere in the document. Do NOT write \\ref to a label that
+   does not exist.
+
+4. **No orphan labels**: Do not define \\label for a float that is
+   never referenced in the text. Every table and figure should be
+   referenced at least once.
+
+5. **No phantom figures**: Do NOT use \\includegraphics unless the
+   image file is known to exist in the build directory. If no image
+   files are available, present data in tables instead. If you must
+   include a figure placeholder, use a \\framebox or \\rule placeholder
+   with a comment explaining what the figure would show.
+
+6. **Reference style in prose**: Always use a capitalized name before
+   the reference: "Table~\\ref{{tab:results}}", "Figure~\\ref{{fig:dist}}",
+   "Algorithm~\\ref{{alg:main}}". Use a non-breaking space (~) between
+   the word and \\ref to prevent line breaks.
 """
 ```
 
@@ -749,6 +788,11 @@ for practical algorithm selection.
 Every generated paper must also satisfy:
 - **100% verified citations** (zero hallucinations)
 - **Compiles without errors** (LaTeX → PDF)
+- **Zero broken cross-references** (no "??" in the output PDF):
+  - Every `\ref{X}` has a matching `\label{X}` in the document
+  - Every `\label` is placed AFTER `\caption` inside its float
+  - No `\includegraphics` for image files that do not exist
+  - Every table and figure is referenced at least once in prose
 - **Quantitative results** (numbers from evaluation_report.md)
 - **Complexity analysis** (Big-O notation where relevant)
 - **Proper figures** (all referenced, high DPI)
@@ -819,9 +863,63 @@ Stirling's approximation appearing in the proof, in its own subsection, and agai
 **10. "Motivation and Significance" subsection that restates the Introduction**
 The Introduction's opening paragraphs already motivate the work. A separate subsection that re-argues the same motivation wastes space and creates a circular reading experience.
 
+### ❌ Cross-Reference Pitfalls
+
+**11. Dangling \\ref with no matching \\label**
+```latex
+% BAD: \ref points to a label that does not exist
+As shown in Table~\ref{tab:ablation}, ...
+% But \label{tab:ablation} is never defined anywhere!
+% Result: "Table ??" in the PDF
+
+% GOOD: Every \ref has a matching \label
+As shown in Table~\ref{tab:ablation}, ...
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lr} ... \end{tabular}
+  \caption{Ablation results.}
+  \label{tab:ablation}   % matches the \ref above
+\end{table}
+```
+
+**12. \\label placed before \\caption (wrong numbering)**
+```latex
+% BAD: label before caption → references wrong number
+\begin{table}[h]
+  \label{tab:results}
+  \centering
+  \begin{tabular}{lr} ... \end{tabular}
+  \caption{Main results.}
+\end{table}
+
+% GOOD: label after caption → correct number
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lr} ... \end{tabular}
+  \caption{Main results.}
+  \label{tab:results}
+\end{table}
+```
+
+**13. \\includegraphics for non-existent image files**
+```latex
+% BAD: references an image file that does not exist in the build dir
+\includegraphics[width=0.8\textwidth]{figures/comparison.png}
+% Result: compilation error or missing figure
+
+% GOOD: use a table instead when image files are unavailable
+% Or use a placeholder:
+\begin{figure}[h]
+  \centering
+  \rule{0.8\textwidth}{5cm}  % placeholder box
+  \caption{Community size distribution (placeholder).}
+  \label{fig:distribution}
+\end{figure}
+```
+
 ### ❌ Technical Pitfalls
 
-**11. Hallucinated Citations**
+**14. Hallucinated Citations**
 ```latex
 % BAD: Made-up paper
 \\cite{smith2024efficient}  % This paper doesn't exist!
@@ -830,7 +928,7 @@ The Introduction's opening paragraphs already motivate the work. A separate subs
 \\cite{vaswani2017attention}  % Transformer paper, verified
 ```
 
-**12. Markdown in LaTeX**
+**15. Markdown in LaTeX**
 ```latex
 % BAD:
 **Our method** achieves #1 results
@@ -839,7 +937,7 @@ The Introduction's opening paragraphs already motivate the work. A separate subs
 \\textbf{Our method} achieves \\#1 results
 ```
 
-**13. Missing Error Bars**
+**16. Missing Error Bars**
 ```latex
 % BAD:
 Our method: 94.2\\%
@@ -848,7 +946,7 @@ Our method: 94.2\\%
 Our method: $94.2 \\pm 0.3\\%$
 ```
 
-**14. No Statistical Tests**
+**17. No Statistical Tests**
 ```latex
 % BAD:
 "significantly better"

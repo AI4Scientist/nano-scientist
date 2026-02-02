@@ -560,6 +560,13 @@ IMPORTANT LaTeX requirements (we compile with Tectonic/XeTeX):
 - Use \\usepackage{{fontspec}} if custom fonts are needed (usually not required)
 - Standard packages (amsmath, graphicx, hyperref, booktabs, algorithm, listings, natbib, geometry) are fine
 
+CROSS-REFERENCE RULES (no "??" in output):
+- Every \\ref{{X}} MUST have a matching \\label{{X}} defined in the document
+- \\label MUST come AFTER \\caption inside every table/figure environment
+- Do NOT use \\includegraphics — no image files exist in the build directory. Use tables or \\rule placeholders instead.
+- Use prefixes: tab: for tables, fig: for figures, eq: for equations, alg: for algorithms
+- Use non-breaking space: Table~\\ref{{tab:X}}, Figure~\\ref{{fig:X}}
+
 Include all standard sections: Abstract, Introduction, Related Work, Method, Experiments, Conclusion.
 
 REMINDER: The paper must be specifically about: {inputs['question']}
