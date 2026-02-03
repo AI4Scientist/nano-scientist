@@ -563,9 +563,28 @@ IMPORTANT LaTeX requirements (we compile with Tectonic/XeTeX):
 CROSS-REFERENCE RULES (no "??" in output):
 - Every \\ref{{X}} MUST have a matching \\label{{X}} defined in the document
 - \\label MUST come AFTER \\caption inside every table/figure environment
-- Do NOT use \\includegraphics — no image files exist in the build directory. Use tables or \\rule placeholders instead.
+- Use TikZ/pgfplots for diagrams and charts (these compile inline, no external files needed)
+- Do NOT use \\includegraphics unless image files are known to exist in the build directory
 - Use prefixes: tab: for tables, fig: for figures, eq: for equations, alg: for algorithms
 - Use non-breaking space: Table~\\ref{{tab:X}}, Figure~\\ref{{fig:X}}
+
+PGFPLOTS RULES (common compilation errors):
+- When using symbolic y coords with xbar: remove ALL spaces after commas in coordinates
+  WRONG: (42, HumanEval)  — pgfplots reads " HumanEval" with leading space → FATAL ERROR
+  RIGHT: (42,HumanEval)   — pgfplots reads "HumanEval" correctly
+- Safest practice: never put spaces after commas in coordinate pairs with symbolic coords
+
+BIBTEX RULES:
+- Every BibTeX entry in references.bib MUST have balanced braces and end with closing }}
+- Keep entries concise: title, author, year, journal/booktitle. Omit abstract, keywords, URL
+- Generate references.bib BEFORE main.tex to avoid truncation
+
+WRITING STYLE (CRITICAL):
+- Write in PROSE PARAGRAPHS, not bullet points or numbered lists
+- Do NOT use \\begin{{itemize}} or \\begin{{enumerate}} for presenting results, findings, or discussions
+- Lists are ONLY acceptable for: algorithm pseudo-code steps, or mathematical definitions/axioms
+- Every section should flow as connected argumentative paragraphs with topic sentences and transitions
+- This is a scientific paper, not a technical report — avoid "list-itis"
 
 Include all standard sections: Abstract, Introduction, Related Work, Method, Experiments, Conclusion.
 
@@ -705,29 +724,55 @@ def _repair_latex(tex_content):
     return tex_content, repairs
 
 
-def compile_latex(paper_dir):
+def _repair_bibtex(bib_content):
     """
-    Compile LaTeX to PDF. Priority: tectonic > pdflatex > Docker.
-    Returns True if PDF was generated.
+    Remove truncated/incomplete BibTeX entries (unclosed braces).
+    Returns (repaired_content, list_of_repairs).
+    """
+    repairs = []
+    entries = []
+    current_start = None
+    depth = 0
+
+    for i, c in enumerate(bib_content):
+        if c == '@' and depth == 0:
+            current_start = i
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0 and current_start is not None:
+                entries.append(bib_content[current_start:i + 1])
+                current_start = None
+
+    # If we ended with an open entry, it was truncated
+    if current_start is not None and depth > 0:
+        truncated = bib_content[current_start:current_start + 80].split('\n')[0]
+        repairs.append(f"removed truncated BibTeX entry: {truncated}...")
+
+    if repairs:
+        repaired = '\n\n'.join(entries) + '\n'
+        return repaired, repairs
+
+    return bib_content, repairs
+
+
+def _try_compile_latex(paper_dir):
+    """
+    Try to compile LaTeX with available tools (tectonic > pdflatex > Docker).
+    Returns (success: bool, error_msg: str).
     """
     import subprocess
     import shutil
 
-    tex_file = paper_dir / "main.tex"
-    if not tex_file.exists():
-        return False
+    pdf_file = paper_dir / "main.pdf"
+    # Remove stale PDF so we detect fresh compilation
+    if pdf_file.exists():
+        pdf_file.unlink()
 
-    # Pre-process: auto-repair common LLM LaTeX errors
-    tex_content = tex_file.read_text()
-    patched, repairs = _repair_latex(tex_content)
-    if repairs:
-        print(f"  [REPAIR] Applied {len(repairs)} LaTeX fix(es):")
-        for r in repairs:
-            print(f"    - {r}")
-    if patched != tex_content:
-        tex_file.write_text(patched)
+    last_error = ""
 
-    # 1. Try Tectonic (preferred - single binary, auto-downloads packages)
+    # 1. Try Tectonic (preferred)
     tectonic_bin = shutil.which("tectonic") or str(Path.home() / ".local/bin/tectonic")
     if Path(tectonic_bin).exists():
         print("  Compiling LaTeX (tectonic)...")
@@ -736,34 +781,39 @@ def compile_latex(paper_dir):
                 [tectonic_bin, "main.tex"],
                 cwd=paper_dir, capture_output=True, text=True, timeout=300
             )
-            if (paper_dir / "main.pdf").exists():
-                print("  PDF generated successfully (tectonic)")
-                return True
-            else:
-                print(f"  Tectonic failed: {result.stderr[-500:]}")
+            if pdf_file.exists():
+                print("  ✓ PDF generated (tectonic)")
+                return True, ""
+            last_error = (result.stderr or result.stdout or "")[-2000:]
+            print(f"  Tectonic failed: {last_error[-500:]}")
         except subprocess.TimeoutExpired:
+            last_error = "Tectonic compilation timed out (>300s)"
             print("  Tectonic timed out")
 
     # 2. Try local pdflatex
     if shutil.which("pdflatex"):
         print("  Compiling LaTeX (pdflatex)...")
         try:
+            result = None
             for _ in range(2):
-                subprocess.run(
+                result = subprocess.run(
                     ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-                    cwd=paper_dir, capture_output=True, timeout=120
+                    cwd=paper_dir, capture_output=True, text=True, timeout=120
                 )
             if shutil.which("bibtex") and (paper_dir / "references.bib").exists():
                 subprocess.run(["bibtex", "main"], cwd=paper_dir, capture_output=True, timeout=60)
-                subprocess.run(
+                result = subprocess.run(
                     ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-                    cwd=paper_dir, capture_output=True, timeout=120
+                    cwd=paper_dir, capture_output=True, text=True, timeout=120
                 )
-            if (paper_dir / "main.pdf").exists():
-                print("  PDF generated successfully (pdflatex)")
-                return True
+            if pdf_file.exists():
+                print("  ✓ PDF generated (pdflatex)")
+                return True, ""
+            if result:
+                last_error = (result.stdout or result.stderr or "")[-2000:]
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            if not last_error:
+                last_error = "pdflatex timed out or not found"
 
     # 3. Try Docker
     if ENABLE_DOCKER or shutil.which("docker"):
@@ -776,18 +826,178 @@ def compile_latex(paper_dir):
                 "pdflatex -interaction=nonstopmode -halt-on-error main.tex && "
                 "pdflatex -interaction=nonstopmode -halt-on-error main.tex"
             )
-            subprocess.run(
+            result = subprocess.run(
                 ["docker", "run", "--rm", "-v", f"{vol}:/work", "-w", "/work",
                  "texlive/texlive:latest", "bash", "-c", cmd],
-                capture_output=True, timeout=300
+                capture_output=True, text=True, timeout=300
             )
-            if (paper_dir / "main.pdf").exists():
-                print("  PDF generated successfully (Docker)")
-                return True
+            if pdf_file.exists():
+                print("  ✓ PDF generated (Docker)")
+                return True, ""
+            last_error = (result.stdout or result.stderr or "")[-2000:]
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            if not last_error:
+                last_error = "Docker compilation timed out or not found"
 
-    print("  ⚠️  Could not compile PDF.")
+    return False, last_error
+
+
+def _llm_repair_latex(tex_content, error_msg, attempt=1, bib_content=None):
+    """
+    Use the LLM to fix LaTeX/BibTeX compilation errors.
+    Returns (fixed_tex, fixed_bib) or (None, None) if repair failed.
+    If bib_content is provided and the error mentions BibTeX, both are sent for repair.
+    """
+    print(f"  [LLM REPAIR] Attempt {attempt}: asking LLM to fix compilation error...")
+
+    bib_is_relevant = bib_content and any(
+        kw in error_msg.lower() for kw in ('bibtex', 'bib', 'bibliography', 'database file')
+    )
+
+    if bib_is_relevant:
+        prompt = f"""Fix the LaTeX/BibTeX compilation error below.
+
+COMPILATION ERROR:
+{error_msg[-2000:]}
+
+=== main.tex ===
+{tex_content}
+
+=== references.bib ===
+{bib_content}
+
+Return the fixed files in this EXACT format (no markdown fences, no explanations):
+===FILE: main.tex===
+(complete fixed LaTeX document from \\documentclass to \\end{{document}})
+===FILE: references.bib===
+(complete fixed BibTeX file with all entries properly closed)
+===END===
+"""
+    else:
+        prompt = f"""Fix the LaTeX compilation error below. Return ONLY the complete fixed LaTeX document.
+
+COMPILATION ERROR:
+{error_msg[-2000:]}
+
+CURRENT LATEX DOCUMENT:
+{tex_content}
+
+RULES:
+- Return the COMPLETE document (from \\documentclass to \\end{{document}})
+- Do NOT wrap in markdown code fences (no ``` markers)
+- Do NOT add explanations — ONLY the fixed LaTeX
+- Fix ONLY the reported error, keep everything else unchanged
+- Common fixes: pgfplots symbolic coord spacing, missing packages, syntax errors, mismatched braces
+"""
+
+    try:
+        response = call_llm(prompt, max_tokens=16000, temperature=0.2)
+
+        if bib_is_relevant and '===FILE:' in response:
+            # Parse multi-file response
+            import re as _re
+            file_re = _re.compile(r'===FILE:\s*(.+?)\s*===\n(.*?)(?=\n===FILE:|\n===END===|$)', _re.DOTALL)
+            files = {m.group(1).strip(): m.group(2).strip() for m in file_re.finditer(response)}
+            fixed_tex = files.get('main.tex')
+            fixed_bib = files.get('references.bib')
+            if fixed_tex and '\\documentclass' in fixed_tex:
+                return fixed_tex, fixed_bib
+            print("  [LLM REPAIR] Multi-file response missing valid main.tex")
+            return None, None
+
+        # Single-file response (tex only)
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            first_nl = cleaned.find('\n')
+            if first_nl != -1:
+                cleaned = cleaned[first_nl + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].rstrip()
+
+        if '\\documentclass' in cleaned and '\\end{document}' in cleaned:
+            return cleaned, None
+        else:
+            print("  [LLM REPAIR] Response doesn't look like a complete LaTeX document")
+            return None, None
+    except Exception as e:
+        print(f"  [LLM REPAIR] Failed: {e}")
+        return None, None
+
+
+def compile_latex(paper_dir, max_repair_attempts=2):
+    """
+    Compile LaTeX to PDF with LLM-assisted error repair.
+
+    Flow:
+    1. Apply static repairs (_repair_latex) — fast, deterministic
+    2. Try compiling with available tools (tectonic > pdflatex > Docker)
+    3. If compilation fails, send error + LaTeX to LLM for repair
+    4. Re-apply static repairs on LLM output, then retry compilation
+    5. Repeat up to max_repair_attempts times
+    """
+    tex_file = paper_dir / "main.tex"
+    if not tex_file.exists():
+        return False
+
+    # Phase 1: Static repairs (fast, deterministic)
+    tex_content = tex_file.read_text()
+    patched, repairs = _repair_latex(tex_content)
+    if repairs:
+        print(f"  [REPAIR] Applied {len(repairs)} static LaTeX fix(es):")
+        for r in repairs:
+            print(f"    - {r}")
+    if patched != tex_content:
+        tex_file.write_text(patched)
+
+    # Static BibTeX repair
+    bib_file = paper_dir / "references.bib"
+    if bib_file.exists():
+        bib_content = bib_file.read_text()
+        patched_bib, bib_repairs = _repair_bibtex(bib_content)
+        if bib_repairs:
+            print(f"  [REPAIR] Applied {len(bib_repairs)} static BibTeX fix(es):")
+            for r in bib_repairs:
+                print(f"    - {r}")
+            bib_file.write_text(patched_bib)
+
+    # Phase 2: Compile → LLM repair → retry loop
+    for attempt in range(max_repair_attempts + 1):
+        success, error_msg = _try_compile_latex(paper_dir)
+        if success:
+            if attempt > 0:
+                print(f"  ✓ Compilation succeeded after {attempt} LLM repair(s)")
+            return True
+
+        if attempt < max_repair_attempts:
+            current_tex = tex_file.read_text()
+            current_bib = bib_file.read_text() if bib_file.exists() else None
+            fixed_tex, fixed_bib = _llm_repair_latex(
+                current_tex, error_msg, attempt + 1, bib_content=current_bib
+            )
+
+            changed = False
+            if fixed_tex and fixed_tex.strip() != current_tex.strip():
+                # Re-apply static repairs on LLM output
+                fixed_tex, extra_repairs = _repair_latex(fixed_tex)
+                if extra_repairs:
+                    print(f"  [REPAIR] Applied {len(extra_repairs)} static fix(es) to LLM output:")
+                    for r in extra_repairs:
+                        print(f"    - {r}")
+                tex_file.write_text(fixed_tex)
+                changed = True
+
+            if fixed_bib and current_bib and fixed_bib.strip() != current_bib.strip():
+                fixed_bib, bib_extra = _repair_bibtex(fixed_bib)
+                if bib_extra:
+                    print(f"  [REPAIR] Applied {len(bib_extra)} static BibTeX fix(es) to LLM output")
+                bib_file.write_text(fixed_bib)
+                changed = True
+
+            if not changed:
+                print("  [LLM REPAIR] No changes produced, stopping retry loop")
+                break
+
+    print("  ⚠️  Could not compile PDF after all repair attempts.")
     print("  Install: python3 utils/install_tectonic.py")
     print("  Or manual: cd paper/ && tectonic main.tex")
     return False

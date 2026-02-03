@@ -1135,6 +1135,57 @@ Our method: $94.2 \\pm 0.3\\%$
 "significantly better ($p < 0.001$, Cohen's $d=1.2$)"
 ```
 
+**18. pgfplots symbolic coordinate spacing — CRITICAL**
+
+When using `symbolic x coords` or `symbolic y coords`, pgfplots includes any whitespace before the symbolic value as part of the coordinate name. A space after the comma in `(42, HumanEval)` means pgfplots looks for ` HumanEval` (with leading space), which doesn't match `HumanEval` in the declaration. This causes a fatal compilation error.
+
+```latex
+% BAD: Space after comma before symbolic coord value
+symbolic y coords={HumanEval, MBPP, APPS},
+\addplot coordinates {
+  (42, HumanEval)   % pgfplots sees " HumanEval" — FATAL ERROR
+  (28, MBPP)
+};
+
+% GOOD: No space before symbolic values
+symbolic y coords={HumanEval, MBPP, APPS},
+\addplot coordinates {
+  (42,HumanEval)    % pgfplots sees "HumanEval" — correct
+  (28,MBPP)
+};
+
+% ALSO GOOD: For ybar with symbolic x coords, space before
+% numeric value is fine (only symbolic values are affected)
+symbolic x coords={Method A, Method B, Ours},
+\addplot coordinates {
+  (Method A, 82.3)  % "Method A" is first — OK
+  (Method B, 85.7)
+};
+```
+
+**Rule**: When a symbolic coordinate appears AFTER the comma in a coordinate pair, remove the space after the comma. The safest practice is to remove all spaces after commas inside coordinate pairs.
+
+**19. Truncated BibTeX entries**
+
+If the response is long, entries near the end of `references.bib` may get truncated mid-entry, causing "Illegal end of database file" errors. Always ensure every BibTeX entry has balanced braces and ends with a closing `}`.
+
+```bibtex
+% BAD: Truncated entry (missing closing brace)
+@article{wang2022codet,
+  title={CodeT: Code Generation with Generated Tests},
+  author={Wang, Bei and
+
+% GOOD: Complete entry
+@article{wang2022codet,
+  title={CodeT: Code Generation with Generated Tests},
+  author={Wang, Bei and others},
+  journal={arXiv preprint arXiv:2207.10397},
+  year={2022}
+}
+```
+
+**Rule**: Generate `references.bib` BEFORE `main.tex` if possible, and keep entries concise (title, author, year, venue/journal). Do not include optional fields (abstract, keywords, URL) that bloat the file.
+
 ---
 
 ## Examples
