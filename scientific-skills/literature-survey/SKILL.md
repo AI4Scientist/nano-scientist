@@ -400,9 +400,12 @@ literature_survey_[timestamp]/
 │   ├── clusters.json           # Topic clusters
 │   └── trends.json             # Temporal analysis
 └── figures/
-    ├── timeline.png            # Papers over time
-    ├── citation_network.png    # Citation graph visualization
-    └── topic_distribution.png  # Cluster sizes
+    ├── timeline.pdf            # Papers over time (vector)
+    ├── timeline.png            # Papers over time (300 DPI)
+    ├── citation_network.pdf    # Citation graph (vector)
+    ├── citation_network.png    # Citation graph (300 DPI)
+    ├── topic_distribution.pdf  # Cluster sizes (vector)
+    └── topic_distribution.png  # Cluster sizes (300 DPI)
 ```
 
 ---
@@ -411,9 +414,17 @@ literature_survey_[timestamp]/
 
 ### Citation Network Visualization
 
+All survey figures must be saved as both **PDF** (vector) and **PNG** (300 DPI) for downstream use by the paper-writing stage. Use colorblind-safe palettes.
+
 ```python
 import networkx as nx
 import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+os.makedirs("figures", exist_ok=True)
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.1)
+PALETTE = sns.color_palette("colorblind")
 
 # Build citation graph
 G = nx.DiGraph()
@@ -430,10 +441,46 @@ pagerank = nx.pagerank(G)
 most_central = sorted(pagerank.items(), key=lambda x: x[1], reverse=True)[:10]
 
 # Visualize
-pos = nx.spring_layout(G)
+fig, ax = plt.subplots(figsize=(10, 8))
+pos = nx.spring_layout(G, seed=42)
 nx.draw(G, pos, node_size=[pagerank[n]*5000 for n in G.nodes()],
-        with_labels=True, font_size=8)
-plt.savefig("figures/citation_network.png", dpi=300)
+        node_color=PALETTE[0:1]*len(G.nodes()), alpha=0.7,
+        with_labels=True, font_size=7, ax=ax)
+ax.set_title("Citation Network (node size = PageRank)")
+fig.savefig("figures/citation_network.pdf", bbox_inches='tight')
+fig.savefig("figures/citation_network.png", dpi=300, bbox_inches='tight')
+plt.close(fig)
+```
+
+**Timeline visualization** (papers per year by topic cluster):
+```python
+fig, ax = plt.subplots(figsize=(8, 4))
+for cluster_id in range(n_clusters):
+    cluster_df = df[df["cluster"] == cluster_id]
+    yearly = cluster_df.groupby("year").size()
+    ax.plot(yearly.index, yearly.values, 'o-', color=PALETTE[cluster_id],
+            label=f"Topic {cluster_id}: {', '.join(cluster_topics[cluster_id][:2])}")
+ax.set_xlabel("Year")
+ax.set_ylabel("Number of Papers")
+ax.legend(fontsize=8, loc="upper left")
+fig.savefig("figures/timeline.pdf", bbox_inches='tight')
+fig.savefig("figures/timeline.png", dpi=300, bbox_inches='tight')
+plt.close(fig)
+```
+
+**Topic distribution** (cluster sizes):
+```python
+cluster_sizes = df["cluster"].value_counts().sort_index()
+cluster_labels = [', '.join(cluster_topics[i][:3]) for i in cluster_sizes.index]
+
+fig, ax = plt.subplots(figsize=(8, 4))
+sns.barplot(x=cluster_labels, y=cluster_sizes.values, palette=PALETTE, ax=ax)
+ax.set_ylabel("Number of Papers")
+ax.set_xlabel("Topic Cluster")
+plt.xticks(rotation=30, ha='right', fontsize=8)
+fig.savefig("figures/topic_distribution.pdf", bbox_inches='tight')
+fig.savefig("figures/topic_distribution.png", dpi=300, bbox_inches='tight')
+plt.close(fig)
 ```
 
 ### Automatic Baseline Detection

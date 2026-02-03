@@ -290,53 +290,115 @@ print(f"Cohen's d = {cohens_d:.2f}")
 
 **Step 8: Generate Figures**
 
-**Bar Chart with Error Bars**:
+All figures must be **publication-quality** and saved in formats consumable by the paper-writing stage. Follow these rules:
+
+**Figure output requirements**:
+- Save as both **PDF** (vector, preferred for LaTeX) and **PNG** (300 DPI fallback)
+- Use `bbox_inches='tight'` to avoid whitespace
+- Save to `figures/` directory with descriptive filenames
+- Use consistent styling across all figures (same color palette, font sizes)
+- Include error bars/confidence intervals on all quantitative plots
+- Use colorblind-safe palettes (`seaborn.color_palette("colorblind")`)
+
+**Shared style setup** (apply at start of all plotting code):
 ```python
 import matplotlib.pyplot as plt
+import seaborn as sns
+import os
 
-methods = ["Baseline", "Ours"]
-means = [92.1, 94.4]
-stds = [0.15, 0.18]
+os.makedirs("figures", exist_ok=True)
 
-plt.bar(methods, means, yerr=stds, capsize=5)
-plt.ylabel("Accuracy (%)")
-plt.title("Performance Comparison")
-plt.savefig("figures/comparison.png", dpi=300, bbox_inches='tight')
+# Publication-quality defaults
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+plt.rcParams.update({
+    "figure.figsize": (6, 4),
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
+    "font.family": "serif",
+    "axes.labelsize": 12,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
+})
+PALETTE = sns.color_palette("colorblind")
 ```
 
-**Line Plot for Scalability**:
+**Bar Chart with Error Bars** (seaborn):
+```python
+import pandas as pd
+
+df = pd.DataFrame({
+    "Method": ["Baseline", "Linformer", "Ours"] * 5,
+    "Accuracy": [92.1, 93.6, 94.4, 92.3, 93.4, 94.2,
+                 91.9, 93.8, 94.6, 92.2, 93.5, 94.4,
+                 92.0, 93.7, 94.3],
+    "Seed": [42]*3 + [43]*3 + [44]*3 + [45]*3 + [46]*3
+})
+
+fig, ax = plt.subplots()
+sns.barplot(data=df, x="Method", y="Accuracy", palette=PALETTE,
+            capsize=0.1, errwidth=1.5, ax=ax)
+ax.set_ylabel("Accuracy (%)")
+ax.set_ylim(88, 96)
+fig.savefig("figures/comparison.pdf")
+fig.savefig("figures/comparison.png")
+plt.close(fig)
+```
+
+**Line Plot for Scalability** (matplotlib):
 ```python
 sizes = [100, 500, 1000, 5000, 10000]
 times_baseline = [0.1, 0.5, 1.2, 8.3, 20.1]
 times_ours = [0.08, 0.3, 0.6, 2.1, 4.5]
 
-plt.plot(sizes, times_baseline, 'o-', label='Baseline')
-plt.plot(sizes, times_ours, 's-', label='Ours')
-plt.xlabel("Dataset Size")
-plt.ylabel("Time (seconds)")
-plt.legend()
-plt.xscale('log')
-plt.yscale('log')
-plt.savefig("figures/scalability.png", dpi=300)
+fig, ax = plt.subplots()
+ax.plot(sizes, times_baseline, 'o-', color=PALETTE[0], label='Baseline')
+ax.plot(sizes, times_ours, 's-', color=PALETTE[1], label='Ours')
+ax.set_xlabel("Dataset Size")
+ax.set_ylabel("Time (seconds)")
+ax.set_xscale('log')
+ax.set_yscale('log')
+ax.legend()
+fig.savefig("figures/scalability.pdf")
+fig.savefig("figures/scalability.png")
+plt.close(fig)
 ```
 
-**Heatmap for Ablations**:
+**Heatmap for Ablations** (seaborn):
 ```python
-import seaborn as sns
+ablation_matrix = pd.DataFrame({
+    "Component Removed": ["None (Full)", "Attention", "Position", "Norm"],
+    "Accuracy": [95.2, 92.0, 93.4, 94.9],
+    "Delta": [0.0, -3.2, -1.8, -0.3]
+})
 
-# Ablation results matrix
-ablation_data = {
-    "Full": 95.2,
-    "- Attention": 92.0,
-    "- Position": 93.4,
-    "- Norm": 94.9
-}
-
-sns.barplot(x=list(ablation_data.keys()), y=list(ablation_data.values()))
-plt.ylabel("Accuracy (%)")
-plt.title("Ablation Study")
-plt.savefig("figures/ablation.png", dpi=300)
+fig, ax = plt.subplots()
+sns.barplot(data=ablation_matrix, x="Component Removed", y="Accuracy",
+            palette=PALETTE, ax=ax)
+ax.set_ylabel("Accuracy (%)")
+ax.set_ylim(88, 96)
+# Annotate deltas
+for i, row in ablation_matrix.iterrows():
+    if row["Delta"] != 0:
+        ax.text(i, row["Accuracy"] + 0.2, f"{row['Delta']:+.1f}",
+                ha='center', fontsize=9, color='red')
+fig.savefig("figures/ablation.pdf")
+fig.savefig("figures/ablation.png")
+plt.close(fig)
 ```
+
+**Distribution / Violin Plot** (seaborn):
+```python
+fig, ax = plt.subplots()
+sns.violinplot(data=df, x="Method", y="Accuracy", palette=PALETTE,
+               inner="quart", ax=ax)
+ax.set_ylabel("Accuracy (%)")
+fig.savefig("figures/distribution.pdf")
+fig.savefig("figures/distribution.png")
+plt.close(fig)
+```
+
+**Important**: Always call `plt.close(fig)` after saving to avoid memory leaks in batch runs. Use the object-oriented API (`fig, ax = plt.subplots()`) rather than `plt.plot()` directly for predictable behavior.
 
 ### Phase 7: Table Generation
 
@@ -429,10 +491,14 @@ experimental_evaluation_[timestamp]/
 │   ├── summary_stats.json       # Means, stds, p-values
 │   └── ablation_matrix.csv      # Ablation results
 ├── figures/
-│   ├── comparison.png           # Bar chart
-│   ├── scalability.png          # Scaling analysis
-│   ├── ablation.png             # Ablation heatmap
-│   └── distribution.png         # Result distributions
+│   ├── comparison.pdf           # Bar chart (vector, preferred for LaTeX)
+│   ├── comparison.png           # Bar chart (300 DPI fallback)
+│   ├── scalability.pdf          # Scaling analysis (vector)
+│   ├── scalability.png          # Scaling analysis (fallback)
+│   ├── ablation.pdf             # Ablation chart (vector)
+│   ├── ablation.png             # Ablation chart (fallback)
+│   ├── distribution.pdf         # Result distributions (vector)
+│   └── distribution.png         # Result distributions (fallback)
 ├── tables/
 │   ├── results.tex              # Main results table
 │   ├── ablation.tex             # Ablation table

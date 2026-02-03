@@ -335,11 +335,23 @@ cross-references (producing "??" in the PDF) are unacceptable.
    never referenced in the text. Every table and figure should be
    referenced at least once.
 
-5. **No phantom figures**: Do NOT use \\includegraphics unless the
-   image file is known to exist in the build directory. If no image
-   files are available, present data in tables instead. If you must
-   include a figure placeholder, use a \\framebox or \\rule placeholder
-   with a comment explaining what the figure would show.
+5. **Figure strategy** (TikZ-first, external images when available):
+   - **Method/architecture diagrams**: ALWAYS use TikZ or pgfplots inline
+     in the LaTeX source. These compile without external files and are
+     publication-quality. Use TikZ for flowcharts, system architectures,
+     data flow diagrams, model architectures, and algorithm illustrations.
+   - **Data plots** (bar charts, line plots, heatmaps): If image files
+     from experiments are available in the build directory, use
+     \\includegraphics. If not, use pgfplots with inline data to generate
+     plots directly in LaTeX, or present data in tables.
+   - **Do NOT use \\includegraphics for files that do not exist.** If no
+     image files are available and pgfplots is insufficient, use a
+     \\framebox or \\rule placeholder with a caption explaining what the
+     figure would show.
+   - **Prefer diagrams over text**: A TikZ architecture diagram is almost
+     always clearer than a paragraph describing component relationships.
+     Use diagrams to explain HOW things work — pipeline stages, model
+     layers, data transformations, algorithm flow.
 
 6. **Reference style in prose**: Always use a capitalized name before
    the reference: "Table~\\ref{{tab:results}}", "Figure~\\ref{{fig:dist}}",
@@ -498,6 +510,12 @@ def prepare_text_for_latex(text):
 
 % Venue-specific packages
 {venue_packages}
+
+% Diagrams and plots (TikZ-first approach)
+\\usepackage{{tikz}}
+\\usepackage{{pgfplots}}
+\\pgfplotsset{{compat=1.18}}
+\\usetikzlibrary{{positioning, arrows.meta, shapes.geometric, fit, calc}}
 
 \\title{{{title}}}
 
@@ -787,6 +805,109 @@ which gives the $\Omega(N \log N)$ lower bound.
 \end{proof}
 ```
 
+### Figures and Diagrams
+
+Papers with clear diagrams are easier to review and more likely to be accepted. Use figures to explain architecture, data flow, and experimental results — readers process visual information faster than dense prose.
+
+**When to use which figure type**:
+
+| Content | Recommended Figure Type | Rationale |
+|---------|------------------------|-----------|
+| System/model architecture | TikZ block diagram | Shows component relationships clearly |
+| Algorithm pipeline/flow | TikZ flowchart | Step-by-step visual walkthrough |
+| Performance comparison | pgfplots bar chart or `\includegraphics` (seaborn/matplotlib) | Precise quantitative comparison |
+| Scaling/trend analysis | pgfplots line plot or `\includegraphics` (seaborn/matplotlib) | Shows trends over input size or time |
+| Ablation heatmap | pgfplots colormap or `\includegraphics` (seaborn) | Dense multi-variable comparison |
+| Data transformation | TikZ diagram with annotations | Shows before/after or pipeline stages |
+| Mathematical intuition | TikZ geometric illustration | Supplements formal proofs |
+
+**TikZ for architecture and flow diagrams** (compile inline, no external files):
+```latex
+% System architecture diagram
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, fill=blue!10, minimum height=2em,
+                  minimum width=6em, text centered, rounded corners},
+    arrow/.style={->, >=stealth, thick}
+  ]
+    \node[block] (input) {Input Data};
+    \node[block, right=2cm of input] (encoder) {Encoder};
+    \node[block, right=2cm of encoder] (decoder) {Decoder};
+    \node[block, right=2cm of decoder] (output) {Output};
+
+    \draw[arrow] (input) -- (encoder);
+    \draw[arrow] (encoder) -- (decoder);
+    \draw[arrow] (decoder) -- (output);
+
+    % Annotation
+    \node[above=0.3cm of encoder, font=\small\itshape] {$f_\theta(x)$};
+  \end{tikzpicture}
+  \caption{Overview of the proposed architecture. Data flows left to right
+    through the encoder--decoder pipeline.}
+  \label{fig:architecture}
+\end{figure}
+```
+
+**pgfplots for data visualization** (inline data, no external files):
+```latex
+% Performance comparison bar chart
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      ybar,
+      bar width=12pt,
+      ylabel={Accuracy (\%)},
+      symbolic x coords={Method A, Method B, Ours},
+      xtick=data,
+      ymin=70, ymax=100,
+      nodes near coords,
+      nodes near coords align={vertical},
+      legend style={at={(0.5,-0.2)}, anchor=north},
+      error bars/y dir=both,
+      error bars/y explicit,
+    ]
+      \addplot+[error bars/y dir=both, error bars/y explicit]
+        coordinates {
+          (Method A, 82.3) +- (0, 1.2)
+          (Method B, 85.7) +- (0, 0.9)
+          (Ours, 91.4) +- (0, 0.7)
+        };
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Comparison of accuracy across methods. Error bars show
+    standard deviation over 5 runs.}
+  \label{fig:comparison}
+\end{figure}
+```
+
+**Using external images from experiments** (seaborn/matplotlib/plotly outputs):
+```latex
+% Only when the image file exists in the build directory
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/scaling_analysis.pdf}
+  \caption{Scaling behavior of our method on datasets from $10^3$ to
+    $10^6$ nodes. Shaded regions show 95\% confidence intervals.}
+  \label{fig:scaling}
+\end{figure}
+```
+
+**Required TikZ/pgfplots packages** (add to preamble):
+```latex
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotscompat{1.18}
+\usetikzlibrary{positioning, arrows.meta, shapes.geometric, fit, calc}
+```
+
+**Figure placement rules**:
+- Every figure MUST be referenced in prose: "Figure~\ref{fig:architecture}"
+- Place figures at top of page (`[t]`) or on their own page (`[p]`) — avoid `[h!]` forcing
+- Each paper should have at least one architecture/method diagram and one results figure
+- Figures should appear near their first reference, not clustered at the end
+
 ### Result Interpretation
 
 When presenting experimental results, do not just list what the numbers show. Explain *why* the numbers look the way they do and what they mean for the paper's thesis:
@@ -826,7 +947,7 @@ Every generated paper must also satisfy:
   - Every table and figure is referenced at least once in prose
 - **Quantitative results** (numbers from evaluation_report.md)
 - **Complexity analysis** (Big-O notation where relevant)
-- **Proper figures** (all referenced, high DPI)
+- **Proper figures** (TikZ/pgfplots for diagrams, \includegraphics only for existing files; all referenced in prose)
 - **Error bars** on experimental results
 - **Reproducibility info** (code, data, hyperparameters)
 
@@ -932,19 +1053,41 @@ As shown in Table~\ref{tab:ablation}, ...
 \end{table}
 ```
 
-**13. \\includegraphics for non-existent image files**
+**13. Missing figures — use TikZ/pgfplots instead of placeholders**
 ```latex
-% BAD: references an image file that does not exist in the build dir
+% BAD: references an image file that does not exist
 \includegraphics[width=0.8\textwidth]{figures/comparison.png}
-% Result: compilation error or missing figure
 
-% GOOD: use a table instead when image files are unavailable
-% Or use a placeholder:
-\begin{figure}[h]
+% BAD: gray placeholder box — unhelpful to reviewers
+\rule{0.8\textwidth}{5cm}
+
+% GOOD: pgfplots bar chart with inline data (no external files needed)
+\begin{figure}[t]
   \centering
-  \rule{0.8\textwidth}{5cm}  % placeholder box
-  \caption{Community size distribution (placeholder).}
-  \label{fig:distribution}
+  \begin{tikzpicture}
+    \begin{axis}[ybar, bar width=10pt, ylabel={F1 Score},
+      symbolic x coords={Small, Medium, Large}, xtick=data]
+      \addplot coordinates {(Small, 0.72) (Medium, 0.68) (Large, 0.61)};
+      \addplot coordinates {(Small, 0.81) (Medium, 0.79) (Large, 0.75)};
+      \legend{Baseline, Ours}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{F1 score across community sizes.}
+  \label{fig:comparison}
+\end{figure}
+
+% GOOD: TikZ architecture diagram (no external files needed)
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[block/.style={draw, rounded corners, fill=blue!8,
+    minimum width=4em, minimum height=2em}, ->, >=stealth, thick]
+    \node[block] (a) {Encoder};
+    \node[block, right=1.5cm of a] (b) {Attention};
+    \node[block, right=1.5cm of b] (c) {Decoder};
+    \draw (a) -- (b); \draw (b) -- (c);
+  \end{tikzpicture}
+  \caption{Model architecture overview.}
+  \label{fig:architecture}
 \end{figure}
 ```
 
