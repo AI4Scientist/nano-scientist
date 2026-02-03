@@ -112,12 +112,15 @@ template = load_template(venue="neurips")
 ```
 
 **Venue-Specific Requirements**:
-| Venue | Page Limit | Anonymity | Supplementary | Code Required |
-|-------|------------|-----------|---------------|---------------|
-| NeurIPS | 9 + refs | Yes (double-blind) | Unlimited | Encouraged |
-| ICML | 8 + refs | Yes | Unlimited | Encouraged |
-| ACL | 8 + refs | Yes | 8 pages | Yes (for reproducibility) |
-| OSDI | 12 + refs | No | Unlimited | Required |
+| Venue | Page Limit | Anonymity | Review Platform | Code Required |
+|-------|------------|-----------|-----------------|---------------|
+| NeurIPS | 9 + refs | Double-blind (anonymous) | OpenReview | Encouraged |
+| ICML | 8 + refs | Double-blind (anonymous) | OpenReview | Encouraged |
+| ICLR | Varies | Double-blind (anonymous) | OpenReview | Encouraged |
+| ACL | 8 + refs | Double-blind (anonymous) | OpenReview | Yes (reproducibility) |
+| OSDI | 12 + refs | Single-blind | HotCRP | Required |
+
+**Default**: All papers use anonymous authors (`\author{Anonymous Author(s)}`) for review-ready submission.
 
 ### Phase 3: LLM-Powered Synthesis
 
@@ -131,6 +134,12 @@ CRITICAL REQUIREMENTS:
 3. **Quantitative Results**: Include all experimental numbers
 4. **Complexity Analysis**: Provide Big-O notation where relevant
 5. **Code Availability**: Mention reproducibility artifacts
+6. **Anonymous Submission**: This paper is for double-blind peer review
+   (e.g., OpenReview). Use "Anonymous Author(s)" for authorship.
+   Do NOT include author names, affiliations, acknowledgments that
+   reveal identity, or self-citations that de-anonymize (e.g., replace
+   "our prior work [OurName2024]" with "prior work [Anonymous]" or
+   cite in third person). Do NOT include a \\thanks{{}} field.
 
 WRITING QUALITY REQUIREMENTS (MANDATORY — read carefully):
 
@@ -492,9 +501,8 @@ def prepare_text_for_latex(text):
 
 \\title{{{title}}}
 
-\\author{{
-  {author_block}
-}}
+% Anonymous submission for peer review (e.g., OpenReview)
+\\author{{Anonymous Author(s)}}
 
 \\begin{{document}}
 
@@ -563,8 +571,11 @@ pdflatex main.tex
 - [x] Hardware requirements specified
 
 ## Venue-Specific
-- [x] Anonymization (if double-blind)
-- [x] Supplementary material prepared
+- [x] Anonymous authors (no names, affiliations, or identifying info)
+- [x] Self-citations in third person or anonymized
+- [x] No identifying URLs or repository links
+- [x] Acknowledgments omitted or placeholder
+- [x] Supplementary material prepared (metadata stripped)
 - [x] Ethics statement (if applicable)
 ```
 
@@ -625,20 +636,40 @@ def verify_citation_arxiv(arxiv_id):
 
 **NeurIPS**:
 - 9 pages + unlimited references
-- Double-blind review (anonymize)
+- Double-blind review via OpenReview — anonymous authors mandatory
 - neurips_2024.sty required
+
+**ICML**:
+- 8 pages + unlimited references
+- Double-blind review via OpenReview — anonymous authors mandatory
+- icml2024.sty required
+
+**ICLR**:
+- Pages vary by track
+- Double-blind review via OpenReview — anonymous authors mandatory
 
 **ACL**:
 - 8 pages + unlimited references
+- Double-blind review via OpenReview — anonymous authors mandatory
 - Mandatory ethics statement
 - Must include limitations section
 - acl2024.sty required
 
 **OSDI**:
 - 12 pages + references
-- Single-blind (authors visible)
+- Single-blind (authors visible) — but default to anonymous for draft stage
 - Mandatory artifact evaluation
 - usenix2024.sty required
+
+### Anonymization Rules (OpenReview Double-Blind)
+
+All papers default to anonymous submission for peer review. The following rules apply:
+
+1. **Author line**: Always `\author{Anonymous Author(s)}` — no names, no affiliations, no `\thanks{}`
+2. **Self-citations**: Cite your own prior work in third person ("Smith et al. [2023] showed..." not "we previously showed [Smith2023]"). If a self-citation would trivially de-anonymize, omit it or replace with "[Anonymous, 2024]"
+3. **Acknowledgments**: Omit or use a placeholder (`\section*{Acknowledgments} Omitted for review.`). Do not name funding agencies, labs, or collaborators that reveal identity
+4. **Repository URLs**: Do not include GitHub links or project URLs that reveal authorship. Use "[Anonymous repository]" as placeholder
+5. **Supplementary material**: Strip author-identifying metadata from all supplementary files
 
 ### Supplementary Material Generation
 
