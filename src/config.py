@@ -18,6 +18,11 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # ===== Required keys in config.yaml =====
 REQUIRED_KEYS = [
+    # LLM Configuration
+    "llm_model",
+    "llm_base_url",
+    "embedding_model",
+    "embedding_base_url",
     # Skill Configuration
     "skill_group",
     "max_skills",
@@ -56,7 +61,7 @@ class Config:
         # Access values
         cfg.port  # 8080 (from CLI)
         cfg.skill_group  # from yaml
-        cfg.llm_model  # from .env
+        cfg.llm_model  # from config.yaml
 
         # Use custom config file
         cfg = Config(config_path="path/to/custom.yaml")
@@ -156,14 +161,14 @@ class Config:
     def port(self) -> int:
         return int(self.get("port"))
 
-    # ===== LLM Configuration (from .env only) =====
+    # ===== LLM Configuration =====
     @property
     def llm_model(self) -> str:
-        return os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
+        return self.get("llm_model")
 
     @property
     def llm_base_url(self) -> str:
-        return os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+        return self.get("llm_base_url")
 
     @property
     def llm_api_key(self) -> str:
@@ -173,14 +178,14 @@ class Config:
     def llm_max_retries(self) -> int:
         return int(os.getenv("LLM_MAX_RETRIES", "3"))
 
-    # ===== Embedding Configuration (from .env only) =====
+    # ===== Embedding Configuration =====
     @property
     def embedding_model(self) -> str:
-        return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        return self.get("embedding_model")
 
     @property
     def embedding_base_url(self) -> str:
-        return os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+        return self.get("embedding_base_url")
 
     @property
     def embedding_api_key(self) -> str:
@@ -270,14 +275,10 @@ DATA_DIR = PROJECT_ROOT / "data"
 SKILLS_DIR = DATA_DIR / "skill_seeds"
 
 # LLM Configuration (from .env, with sensible defaults for optional items)
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 
-# Embedding Configuration (from .env, with sensible defaults for optional items)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+# Embedding Configuration (API key still from .env for security)
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
 

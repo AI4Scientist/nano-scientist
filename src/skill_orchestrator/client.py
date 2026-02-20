@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional, AsyncIterator, Callable
 
+from config import get_config
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk import (
     ClaudeSDKClient,
@@ -79,6 +80,7 @@ class SkillClient:
         # Merge default blacklist and user-specified blacklist
         final_disallowed = self.DEFAULT_DISALLOWED_TOOLS + (disallowed_tools or [])
 
+        cfg = get_config()
         self.options = ClaudeAgentOptions(
             allowed_tools=allowed_tools or [
                 "Skill",
@@ -89,7 +91,7 @@ class SkillClient:
             permission_mode="default",
             cwd=cwd or str(Path.cwd()),
             max_buffer_size=10485760,
-            model='claude-sonnet-4-6',
+            model=cfg.llm_model,
         )
         self.client: Optional[ClaudeSDKClient] = None
         self._connected = False

@@ -109,8 +109,6 @@ def list_skills():
 
 async def run_research(task: str, skill_names: list[str], verbose: bool = False, node_timeout: float = None):
     """Run the research pipeline."""
-    cfg = get_config()
-
     # Create run context
     run_context = RunContext.create(task, base_dir="research_outputs", mode="dag", task_name="research")
 

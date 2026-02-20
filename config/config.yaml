@@ -4,6 +4,26 @@
 # =============================================================================
 
 # =============================================================================
+# LLM Configuration
+# =============================================================================
+
+# LLM model for agent execution (via OpenRouter or direct API)
+# Used by SkillClient for all node execution
+# Examples: anthropic/claude-haiku-4.5, openai/gpt-4o, google/gemini-2.5-pro
+llm_model: anthropic/claude-haiku-4.5
+
+# LLM API base URL
+# Examples: https://openrouter.ai/api/v1, https://api.openai.com/v1
+llm_base_url: https://openrouter.ai/api/v1
+
+# Embedding model for vector search
+# Examples: openai/text-embedding-3-large, openai/text-embedding-3-small
+embedding_model: openai/text-embedding-3-large
+
+# Embedding API base URL
+embedding_base_url: https://openrouter.ai/api/v1
+
+# =============================================================================
 # Skill Configuration
 # =============================================================================
 
