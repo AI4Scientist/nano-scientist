@@ -222,15 +222,23 @@ class SkillOrchestrator:
                 self._enqueue_log(message, level)
 
             if len(skills) > 1:
-                async with SkillClient(
-                    session_id=f"orch-{task[:20]}",
-                    log_callback=main_log_callback
-                ) as client:
-                    self.client = client
-                    plans_result = await self._generate_plans(task, skills, context)
-                # Planner session closed here — frees API slot for node execution
-                self.client = None
-                await viz.add_log("Planner session closed", "info")
+                cfg = get_config()
+                if cfg.planner_model:
+                    # Use LiteLLM direct API call (bypasses Claude SDK rate limits)
+                    await viz.add_log(f"Using LiteLLM planner: {cfg.planner_model}", "info")
+                    plans_result = await self._generate_plans_litellm(task, skills, context)
+                else:
+                    # Fallback: Claude SDK planner
+                    async with SkillClient(
+                        session_id=f"orch-{task[:20]}",
+                        allowed_tools=["Read"],
+                        max_turns=1,
+                        log_callback=main_log_callback
+                    ) as client:
+                        self.client = client
+                        plans_result = await self._generate_plans(task, skills, context)
+                    self.client = None
+                    await viz.add_log("Planner session closed", "info")
 
             if "error" in plans_result:
                 await viz.add_log(f"Planning failed: {plans_result['error']}", "error")
@@ -323,19 +331,22 @@ class SkillOrchestrator:
 
     async def _generate_plans(self, task: str, skills: list[SkillMetadata], context: Optional[dict]) -> dict:
         """Generate multiple execution plans using the client."""
-        # Include skill names, descriptions, and content for planning
+        # Only send skill names and descriptions to the planner.
+        # Full skill content is NOT needed for DAG planning and wastes tokens.
         skill_info_parts = []
         for s in skills:
-            skill_info_parts.append(f"### Skill: {s.name}\n{s.description}\n\n#### Content:\n{s.content}")
-        skill_info = "\n\n".join(skill_info_parts)
+            skill_info_parts.append(f"- **{s.name}**: {s.description}")
+        skill_info = "\n".join(skill_info_parts)
 
         context_str = f"\nContext: {json.dumps(context)}" if context else ""
 
         prompt = build_planner_prompt(task, skill_info, context_str)
         response = await self.client.execute(prompt)
+        self._enqueue_log(f"Planner response ({len(response)} chars): {response[:500]}", "info")
         result = extract_json(response)
 
         if not result:
+            self._enqueue_log(f"Failed to parse JSON from planner response: {response[:200]}", "error")
             return {"error": "Failed to parse response"}
 
         # Handle both old format {"nodes": [...]} and new format {"plans": [...]}
@@ -345,6 +356,64 @@ class SkillOrchestrator:
             return {"plans": [{"name": "Default Plan", "description": "Single execution plan", "nodes": result["nodes"]}]}
 
         return {"error": "Invalid plan format"}
+
+    async def _generate_plans_litellm(self, task: str, skills: list[SkillMetadata], context: Optional[dict]) -> dict:
+        """Generate execution plans using LiteLLM direct API call.
+
+        Bypasses Claude SDK/CLI entirely, avoiding CLI system prompt overhead
+        and using a separate API endpoint (OpenRouter) with its own rate limits.
+        """
+        import litellm
+
+        cfg = get_config()
+
+        # Build the same prompt as Claude SDK planner
+        skill_info_parts = []
+        for s in skills:
+            skill_info_parts.append(f"- **{s.name}**: {s.description}")
+        skill_info = "\n".join(skill_info_parts)
+        context_str = f"\nContext: {json.dumps(context)}" if context else ""
+        prompt = build_planner_prompt(task, skill_info, context_str)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self._enqueue_log(f"LiteLLM planner attempt {attempt + 1}/{max_retries}", "info")
+                response = await litellm.acompletion(
+                    model=cfg.planner_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    api_key=cfg.llm_api_key,
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+                text = response.choices[0].message.content or ""
+                self._enqueue_log(f"Planner response ({len(text)} chars): {text[:500]}", "info")
+
+                result = extract_json(text)
+                if not result:
+                    self._enqueue_log(f"Failed to parse JSON from planner response: {text[:200]}", "error")
+                    if attempt < max_retries - 1:
+                        continue
+                    return {"error": "Failed to parse response"}
+
+                # Handle both formats
+                if "plans" in result:
+                    return result
+                elif "nodes" in result:
+                    return {"plans": [{"name": "Default Plan", "description": "Single execution plan", "nodes": result["nodes"]}]}
+
+                return {"error": "Invalid plan format"}
+
+            except Exception as e:
+                self._enqueue_log(f"LiteLLM planner error: {e}", "error")
+                if attempt < max_retries - 1:
+                    wait_time = 10 * (attempt + 1)
+                    self._enqueue_log(f"Retrying in {wait_time}s...", "warn")
+                    await asyncio.sleep(wait_time)
+                else:
+                    return {"error": f"LiteLLM planner failed: {e}"}
+
+        return {"error": "LiteLLM planner exhausted retries"}
 
     async def _execute_node(self, node_id: str) -> dict:
         """Execute a single node using the Skill tool."""

@@ -67,31 +67,31 @@ class SkillClient:
         allowed_tools: Optional[list[str]] = None,
         disallowed_tools: Optional[list[str]] = None,
         cwd: Optional[str] = None,
+        max_turns: Optional[int] = None,
         log_callback: Optional[Callable[[str, str], None]] = None,
     ):
         self.session_id = session_id
         self.log_callback = log_callback
 
-        # Determine if skills need to be loaded:
-        # - When allowed_tools=None, use default value (includes Skill)
-        # - When allowed_tools explicitly includes "Skill", need to load
-        needs_skills = allowed_tools is None or "Skill" in allowed_tools
-
         # Merge default blacklist and user-specified blacklist
         final_disallowed = self.DEFAULT_DISALLOWED_TOOLS + (disallowed_tools or [])
 
         cfg = get_config()
+        _max_turns = max_turns if max_turns is not None else cfg.max_turns_per_node
+        _allowed_tools = allowed_tools if allowed_tools is not None else [
+            "Bash", "Read", "Write", "Glob", "Grep", "Edit"
+        ]
         self.options = ClaudeAgentOptions(
-            allowed_tools=allowed_tools or [
-                "Skill",
-                "Bash", "Read", "Write", "Glob", "Grep", "Edit"
-            ],
+            allowed_tools=_allowed_tools,
             disallowed_tools=final_disallowed,
-            setting_sources=["user", "project"] if needs_skills else None,
+            # No Claude Code skills/plugins needed — pipeline skills come from
+            # data/skill_seeds/ and are injected directly into prompts.
+            setting_sources=None,
             permission_mode="default",
             cwd=cwd or str(Path.cwd()),
             max_buffer_size=10485760,
             model=cfg.llm_model,
+            max_turns=_max_turns,
         )
         self.client: Optional[ClaudeSDKClient] = None
         self._connected = False
@@ -179,10 +179,14 @@ class SkillClient:
             except MessageParseError as e:
                 if "rate_limit_event" in str(e) and attempt < max_retries - 1:
                     wait_time = 60 * (attempt + 1)
-                    # Set global cooldown so other sessions also back off
                     await _shared_rate_limit.set_cooldown(wait_time)
-                    self._log(f"Rate limited (attempt {attempt + 1}/{max_retries}). Global cooldown {wait_time}s...", "warn")
+                    self._log(f"Rate limited (attempt {attempt + 1}/{max_retries}). Reconnecting after {wait_time}s...", "warn")
+                    # CRITICAL: Kill the broken subprocess and start fresh.
+                    # After a rate limit event the CLI subprocess is in an
+                    # undefined state — reusing it produces empty responses.
+                    await self.disconnect()
                     await asyncio.sleep(wait_time)
+                    await self.connect()
                 else:
                     raise
 
@@ -249,10 +253,11 @@ class SkillClient:
             except MessageParseError as e:
                 if "rate_limit_event" in str(e) and attempt < max_retries - 1:
                     wait_time = 60 * (attempt + 1)
-                    # Set global cooldown so other sessions also back off
                     await _shared_rate_limit.set_cooldown(wait_time)
-                    self._log(f"Rate limited (attempt {attempt + 1}/{max_retries}). Global cooldown {wait_time}s...", "warn")
+                    self._log(f"Rate limited (attempt {attempt + 1}/{max_retries}). Reconnecting after {wait_time}s...", "warn")
+                    await self.disconnect()
                     await asyncio.sleep(wait_time)
+                    await self.connect()
                 else:
                     raise
 

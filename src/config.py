@@ -20,6 +20,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 REQUIRED_KEYS = [
     # LLM Configuration
     "llm_model",
+    "planner_model",
     "llm_base_url",
     "embedding_model",
     "embedding_base_url",
@@ -44,6 +45,7 @@ REQUIRED_KEYS = [
     # Orchestrator Configuration
     "node_timeout",
     "max_concurrent",
+    "max_turns_per_node",
     # Retry Configuration
     "retry_base_delay",
     "max_retries",
@@ -167,6 +169,10 @@ class Config:
         return self.get("llm_model")
 
     @property
+    def planner_model(self) -> str:
+        return self.get("planner_model")
+
+    @property
     def llm_base_url(self) -> str:
         return self.get("llm_base_url")
 
@@ -251,6 +257,10 @@ class Config:
     @property
     def max_concurrent(self) -> int:
         return int(self.get("max_concurrent"))
+
+    @property
+    def max_turns_per_node(self) -> int:
+        return int(self.get("max_turns_per_node"))
 
     # ===== Retry Configuration =====
     @property

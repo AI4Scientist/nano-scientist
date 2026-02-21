@@ -47,12 +47,7 @@ PLANNER_PROMPT = """You are a workflow planner. Generate DAG execution plans by 
 ```
 
 ## Rules
-1. Generate exactly 5 plans with different strategies:
-   - Plan 1: Maximum parallelism (run as many skills concurrently as possible)
-   - Plan 2: Sequential/safe (minimize risk, ensure quality at each step)
-   - Plan 3: Balanced (reasonable parallelism with quality checkpoints)
-   - Plan 4: Creative/alternative (different approach to achieve the goal)
-   - Plan 5: Minimal nodes (most efficient path)
+1. Generate exactly 1 plan using the most balanced strategy (reasonable parallelism with quality checkpoints).
 
 2. **Skill Constraint**: Node `name` MUST exactly match one of the available skill names
    - NEVER invent or create skills not in the Available Skills list
@@ -123,7 +118,7 @@ def build_planner_prompt(task: str, skills_info: str, context_str: str = "") -> 
 ## Available Skills
 {skills_info}
 
-Output ONLY the JSON with all 5 plans.
+Output ONLY the JSON with the plan.
 """
 
 

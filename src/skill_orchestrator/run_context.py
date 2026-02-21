@@ -42,7 +42,8 @@ class RunContext:
         """
         import re
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        task_hash = hashlib.md5(task.encode()).hexdigest()[:6]
+        import uuid
+        task_hash = uuid.uuid4().hex[:6]
 
         parts = [timestamp]
         if mode:
