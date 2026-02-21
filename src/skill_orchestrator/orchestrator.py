@@ -217,83 +217,87 @@ class SkillOrchestrator:
                 plans_result = {"plans": [{"name": "Direct Execution", "nodes": [single_node]}]}
             else:
                 await viz.add_log("Generating execution plans...", "info")
-            # Use log queue for synchronous callback from SkillClient
+            # Step 2b: Generate plans (only needs a session for multi-skill orchestration)
             def main_log_callback(message: str, level: str = "info") -> None:
                 self._enqueue_log(message, level)
-            async with SkillClient(
-                session_id=f"orch-{task[:20]}",
-                log_callback=main_log_callback
-            ) as client:
-                self.client = client
 
-                if len(skills) > 1:
+            if len(skills) > 1:
+                async with SkillClient(
+                    session_id=f"orch-{task[:20]}",
+                    log_callback=main_log_callback
+                ) as client:
+                    self.client = client
                     plans_result = await self._generate_plans(task, skills, context)
-                if "error" in plans_result:
-                    await viz.add_log(f"Planning failed: {plans_result['error']}", "error")
-                    return {"status": "failed", "error": plans_result["error"]}
+                # Planner session closed here — frees API slot for node execution
+                self.client = None
+                await viz.add_log("Planner session closed", "info")
 
-                plans = plans_result.get("plans", [])
-                await viz.add_log(f"Generated {len(plans)} plans", "ok")
+            if "error" in plans_result:
+                await viz.add_log(f"Planning failed: {plans_result['error']}", "error")
+                return {"status": "failed", "error": plans_result["error"]}
 
-                if plan_only:
-                    result["status"] = "plan_only"
-                    result["plans"] = plans
-                    await viz.add_log("Stopped after planning (plan_only mode)", "info")
-                    return result
+            plans = plans_result.get("plans", [])
+            await viz.add_log(f"Generated {len(plans)} plans", "ok")
 
-                # Let user select a plan (or auto-select if only one)
-                if len(plans) > 1:
-                    await viz.add_log(f"Waiting for user to select from {len(plans)} plans...", "info")
-                    selected_index = await viz.select_plan(plans)
-                else:
-                    selected_index = 0
+            if plan_only:
+                result["status"] = "plan_only"
+                result["plans"] = plans
+                await viz.add_log("Stopped after planning (plan_only mode)", "info")
+                return result
 
-                selected_plan = plans[selected_index] if plans else {"nodes": []}
-                self.graph = build_graph_from_nodes(selected_plan["nodes"])
-                phases = self.graph.get_execution_phases()
+            # Let user select a plan (or auto-select if only one)
+            if len(plans) > 1:
+                await viz.add_log(f"Waiting for user to select from {len(plans)} plans...", "info")
+                selected_index = await viz.select_plan(plans)
+            else:
+                selected_index = 0
 
-                # Save selected execution plan
-                if self.run_context:
-                    self.run_context.save_plan(selected_plan)
+            selected_plan = plans[selected_index] if plans else {"nodes": []}
+            self.graph = build_graph_from_nodes(selected_plan["nodes"])
+            phases = self.graph.get_execution_phases()
 
-                # Initialize visualizer with nodes
-                await viz.set_nodes(selected_plan["nodes"], phases)
-                await viz.add_log(f"Selected plan: {selected_plan.get('name', 'Default')}", "info")
+            # Save selected execution plan
+            if self.run_context:
+                self.run_context.save_plan(selected_plan)
 
-                # Step 3: Execute nodes in parallel phases
-                for phase_idx, phase in enumerate(phases, 1):
-                    await viz.set_phase(phase_idx)
-                    await viz.add_log(
-                        f"Starting phase {phase_idx}/{len(phases)} "
-                        f"({len(phase.nodes)} nodes, mode: {phase.mode})",
-                        "info"
-                    )
+            # Initialize visualizer with nodes
+            await viz.set_nodes(selected_plan["nodes"], phases)
+            await viz.add_log(f"Selected plan: {selected_plan.get('name', 'Default')}", "info")
 
-                    # Mark all nodes in phase as running
-                    for node_id in phase.nodes:
-                        await viz.update_status(node_id, "running")
+            # Step 3: Execute nodes in parallel phases
+            for phase_idx, phase in enumerate(phases, 1):
+                await viz.set_phase(phase_idx)
+                await viz.add_log(
+                    f"Starting phase {phase_idx}/{len(phases)} "
+                    f"({len(phase.nodes)} nodes, mode: {phase.mode})",
+                    "info"
+                )
 
-                    # Execute phase (parallel or sequential based on mode)
-                    phase_results = await self._execute_phase_parallel(phase)
+                # Mark all nodes in phase as running
+                for node_id in phase.nodes:
+                    await viz.update_status(node_id, "running")
 
-                    # Update visualizer with results
-                    for node_result in phase_results:
-                        status = "completed" if node_result.status == NodeStatus.COMPLETED else "failed"
-                        await viz.update_status(node_result.node_id, status)
+                # Execute phase (parallel or sequential based on mode)
+                phase_results = await self._execute_phase_parallel(phase)
 
-                        if node_result.status == NodeStatus.COMPLETED:
-                            await viz.add_log(
-                                f"Node {node_result.node_id} completed "
-                                f"({node_result.execution_time_seconds:.1f}s)",
-                                "ok"
-                            )
-                            if node_result.summary:
-                                await viz.add_log(f"  Summary: {node_result.summary}", "info")
-                        else:
-                            await viz.add_log(
-                                f"Node {node_result.node_id} failed: {node_result.error or 'unknown'}",
-                                "error"
-                            )
+                # Update visualizer with results
+                for node_result in phase_results:
+                    status = "completed" if node_result.status == NodeStatus.COMPLETED else "failed"
+                    await viz.update_status(node_result.node_id, status)
+
+                    if node_result.status == NodeStatus.COMPLETED:
+                        await viz.add_log(
+                            f"Node {node_result.node_id} completed "
+                            f"({node_result.execution_time_seconds:.1f}s)",
+                            "ok"
+                        )
+                        if node_result.summary:
+                            await viz.add_log(f"  Summary: {node_result.summary}", "info")
+                    else:
+                        await viz.add_log(
+                            f"Node {node_result.node_id} failed: {node_result.error or 'unknown'}",
+                            "error"
+                        )
 
             # Finalize
             stats = self.graph.get_stats()
