@@ -2,8 +2,8 @@
 
 import re
 import subprocess
+import uuid
 from pathlib import Path
-from datetime import datetime
 
 from pocketflow import Node
 
@@ -419,8 +419,8 @@ Write the report now."""
         bib_content = dedup_bibtex(shared.get("bibtex_entries", []))
 
         # Create output directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(shared.get("output_dir", "research_outputs")) / timestamp
+        task_id = str(uuid.uuid4())
+        out_dir = Path(shared.get("output_dir", "outputs")) / task_id
         out_dir.mkdir(parents=True, exist_ok=True)
 
         (out_dir / "report.tex").write_text(tex, encoding="utf-8")
@@ -445,6 +445,10 @@ class CompileTeX(Node):
         return shared["output_path"]
 
     def exec(self, out_dir):
+        import shutil
+        if not shutil.which("pdflatex"):
+            return None, "pdflatex not found"
+
         cmds = [
             ["pdflatex", "-interaction=nonstopmode", "report.tex"],
             ["bibtex", "report"],
@@ -469,6 +473,12 @@ class CompileTeX(Node):
 
     def post(self, shared, prep_res, exec_res):
         success, log = exec_res
+        if success is None:
+            print(f"[CompileTeX] pdflatex not installed — skipping PDF compilation.")
+            print(f"[CompileTeX] LaTeX source ready at: {shared['output_path']}/report.tex")
+            print(f"[CompileTeX] To compile manually: cd {shared['output_path']} && pdflatex report.tex && bibtex report && pdflatex report.tex && pdflatex report.tex")
+            self._print_cost_summary(shared)
+            return "done"
         if success:
             print(f"[CompileTeX] PDF compiled successfully: {shared['output_path']}/report.pdf")
             self._print_cost_summary(shared)

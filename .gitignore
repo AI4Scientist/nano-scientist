@@ -46,7 +46,7 @@ MANIFEST
 *.log
 
 # Research outputs (generated artifacts)
-research_outputs/
+outputs/
 
 # OS
 .DS_Store

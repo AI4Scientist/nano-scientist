@@ -76,8 +76,8 @@ Examples:
         help="Budget in USD for LLM inference (default: $0.50)",
     )
     parser.add_argument(
-        "--output", "-o", default="research_outputs",
-        help="Output directory (default: research_outputs/)",
+        "--output", "-o", default="outputs",
+        help="Output directory (default: outputs/)",
     )
     parser.add_argument(
         "--list-skills", action="store_true", help="List available skills",
