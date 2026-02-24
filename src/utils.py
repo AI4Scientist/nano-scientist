@@ -128,12 +128,35 @@ def load_skill_index(skills_dir: str) -> dict[str, str]:
     return index
 
 
-def load_skill_content(skills_dir: str, skill_name: str) -> str:
-    """Lazy-load a single SKILL.md on demand (called by ExecuteSkill only)."""
+def load_skill_content(skills_dir: str, skill_name: str) -> tuple[str, dict]:
+    """Lazy-load a single SKILL.md on demand (called by ExecuteSkill only).
+
+    Returns (content, metadata) where metadata is the parsed YAML frontmatter.
+    Content has the frontmatter stripped.
+    """
     skill_file = Path(skills_dir) / skill_name / "SKILL.md"
     if not skill_file.exists():
         raise FileNotFoundError(f"SKILL.md not found: {skill_file}")
-    return skill_file.read_text(encoding="utf-8")
+    raw = skill_file.read_text(encoding="utf-8")
+
+    # Parse YAML frontmatter (between --- delimiters)
+    metadata = {}
+    content = raw
+    fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw, re.DOTALL)
+    if fm_match:
+        try:
+            metadata = yaml.safe_load(fm_match.group(1)) or {}
+        except yaml.YAMLError:
+            metadata = {}
+        content = raw[fm_match.end():]
+
+    # Normalize allowed-tools to a list of strings
+    tools = metadata.get("allowed-tools", [])
+    if isinstance(tools, str):
+        tools = [t.strip() for t in tools.split(",")]
+    metadata["allowed-tools"] = tools
+
+    return content.strip(), metadata
 
 
 def format_skill_index(index: dict[str, str]) -> str:
@@ -190,15 +213,51 @@ def extract_bibtex(text: str) -> tuple[str, list[str]]:
     return main_content, entries
 
 
+def is_valid_bibtex_key(key: str) -> bool:
+    """Validate a BibTeX citation key.
+
+    Valid keys: alphanumeric plus hyphen, underscore, colon, period, slash.
+    Must be 2-80 chars. No spaces, no quotes, no prose fragments.
+    """
+    if not key or len(key) < 2 or len(key) > 80:
+        return False
+    if not re.match(r'^[a-zA-Z0-9_:.\-/]+$', key):
+        return False
+    # Reject keys with too many consecutive lowercase letters (likely prose)
+    if len(key) > 40 and not re.search(r'\d', key):
+        return False
+    return True
+
+
+def _bibtex_entry_has_required_fields(entry: str) -> bool:
+    """Check that a BibTeX entry has at minimum author and title fields."""
+    lower = entry.lower()
+    has_author = bool(re.search(r'author\s*=', lower))
+    has_title = bool(re.search(r'title\s*=', lower))
+    return has_author and has_title
+
+
 def dedup_bibtex(entries: list[str]) -> str:
-    """Deduplicate BibTeX entries by cite key, return combined .bib content."""
+    """Deduplicate BibTeX entries by cite key, return combined .bib content.
+
+    Rejects entries with invalid cite keys or missing required fields.
+    """
     seen = {}
+    rejected = 0
     for entry in entries:
         match = re.match(r"@\w+\{([^,]+),", entry)
         if match:
             key = match.group(1).strip()
+            if not is_valid_bibtex_key(key):
+                rejected += 1
+                continue
+            if not _bibtex_entry_has_required_fields(entry):
+                rejected += 1
+                continue
             if key not in seen:
                 seen[key] = entry
+    if rejected:
+        print(f"[dedup_bibtex] Rejected {rejected} invalid BibTeX entries")
     return "\n\n".join(seen.values()) + "\n" if seen else ""
 
 

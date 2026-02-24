@@ -1,8 +1,10 @@
 """PocketFlow nodes for the Autonomous Scientist agent."""
 
+import os
 import re
 import subprocess
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from pocketflow import Node
@@ -34,6 +36,7 @@ LATEX_SKELETON = r"""\documentclass[11pt]{article}
 \usepackage[T1]{fontenc}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
+\graphicspath{{./figures/}}
 \usepackage{booktabs}
 \usepackage{hyperref}
 \usepackage[numbers,sort&compress]{natbib}
@@ -168,6 +171,32 @@ plan:
         shared["history"] = []
         shared["fix_attempts"] = 0
 
+        # Create task directory early so all phases can persist intermediaries
+        task_id = str(uuid.uuid4())
+        out_dir = Path(shared.get("output_dir", "outputs")) / task_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "artifacts").mkdir(exist_ok=True)
+        (out_dir / "figures").mkdir(exist_ok=True)
+        (out_dir / "data").mkdir(exist_ok=True)
+        (out_dir / "scripts").mkdir(exist_ok=True)
+        shared["output_path"] = str(out_dir)
+
+        # Persist plan
+        import yaml as _yaml
+        plan_data = {
+            "task_id": task_id,
+            "topic": shared["topic"],
+            "domain": shared["domain"],
+            "report_type": shared["report_type"],
+            "budget_dollars": shared["budget_dollars"],
+            "plan": shared["plan"],
+        }
+        (out_dir / "plan.yaml").write_text(
+            _yaml.dump(plan_data, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        print(f"[BudgetPlanner] Task directory: {out_dir}")
         print(f"[BudgetPlanner] Domain: {shared['domain']}")
         print(f"[BudgetPlanner] Report type: {shared['report_type']}")
         print(f"[BudgetPlanner] Plan: {len(shared['plan'])} steps")
@@ -190,11 +219,15 @@ class DecideNext(Node):
             history_lines.append(f"- {h['skill']}: {h['summary']} (${h['cost']:.4f})")
         history_text = "\n".join(history_lines) if history_lines else "None yet."
 
-        # Remaining plan steps
-        completed_skills = {h["skill"] for h in shared.get("history", [])}
-        remaining = [
-            s for s in shared.get("plan", []) if s["skill"] not in completed_skills
-        ]
+        # Remaining plan steps — count-based to preserve duplicate skills
+        exec_counts = Counter(h["skill"] for h in shared.get("history", []))
+        remaining = []
+        skill_seen = Counter()
+        for s in shared.get("plan", []):
+            skill = s["skill"]
+            skill_seen[skill] += 1
+            if skill_seen[skill] > exec_counts.get(skill, 0):
+                remaining.append(s)
 
         return {
             "topic": shared["topic"],
@@ -263,10 +296,32 @@ reason: <brief reason>
         decision, usage = exec_res
         track_cost(shared, "decide_next", usage)
 
+        if not decision or not isinstance(decision, dict):
+            print("[DecideNext] WARNING: Failed to parse LLM response, defaulting to next plan step")
+            remaining = prep_res.get("remaining_plan", [])
+            if remaining:
+                decision = {"action": "execute_skill", "skill": remaining[0]["skill"], "reason": "parse fallback"}
+            else:
+                decision = {"action": "write_tex", "reason": "parse fallback — no remaining steps"}
+
         action = decision.get("action", "write_tex")
         reason = decision.get("reason", "")
         print(f"[DecideNext] Action: {action} — {reason}")
         print(f"[DecideNext] Budget remaining: ${shared['budget_remaining']:.4f}")
+
+        # Persist decision log to task directory
+        shared.setdefault("decisions", []).append({
+            "action": action,
+            "skill": decision.get("skill", ""),
+            "reason": reason,
+            "budget_remaining": shared["budget_remaining"],
+        })
+        import json as _json
+        out_dir = Path(shared["output_path"])
+        (out_dir / "decisions.json").write_text(
+            _json.dumps(shared["decisions"], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
         # Budget guard
         if shared["budget_remaining"] < BUDGET_RESERVE:
@@ -283,12 +338,23 @@ reason: <brief reason>
 # 3. ExecuteSkill
 # ===================================================================
 class ExecuteSkill(Node):
-    """Load a skill's SKILL.md and run it via LLM."""
+    """Load a skill's SKILL.md, run it via LLM, and execute any code blocks."""
 
     def prep(self, shared):
         skill_name = shared["next_skill"]
-        # Lazy-load: only read the SKILL.md we actually need right now
-        skill_content = load_skill_content(shared["skills_dir"], skill_name)
+        # Lazy-load: read the SKILL.md and parse metadata
+        skill_content, skill_metadata = load_skill_content(shared["skills_dir"], skill_name)
+
+        # Detect code execution capability
+        allowed_tools = skill_metadata.get("allowed-tools", [])
+        can_execute = "Bash" in allowed_tools
+
+        # Find available scripts for this skill
+        scripts_dir = Path(shared["skills_dir"]) / skill_name / "scripts"
+        available_scripts = []
+        if scripts_dir.is_dir():
+            available_scripts = [f.name for f in scripts_dir.iterdir()
+                                 if f.suffix == ".py" and f.is_file()]
 
         # Condensed prior context (summaries only, not full artifacts)
         context_lines = []
@@ -296,14 +362,79 @@ class ExecuteSkill(Node):
             context_lines.append(f"### {h['skill']}\n{h['summary']}")
         prior_context = "\n\n".join(context_lines) if context_lines else "No prior research yet."
 
+        # Collect existing generated data files for context
+        generated_files = shared.get("generated_files", {})
+        data_files_info = ""
+        if generated_files:
+            file_lines = []
+            for sk, files in generated_files.items():
+                for f in files:
+                    file_lines.append(f"  - {f} (from {sk})")
+            if file_lines:
+                data_files_info = "Previously generated data files:\n" + "\n".join(file_lines)
+
         return {
             "skill_name": skill_name,
             "skill_content": skill_content,
             "topic": shared["topic"],
             "prior_context": prior_context,
+            "can_execute": can_execute,
+            "available_scripts": available_scripts,
+            "scripts_dir": str(scripts_dir) if scripts_dir.is_dir() else "",
+            "task_dir": shared.get("output_path", ""),
+            "data_files_info": data_files_info,
         }
 
     def exec(self, prep_res):
+        # Build code execution instructions if the skill supports it
+        code_exec_block = ""
+        if prep_res["can_execute"] and prep_res["task_dir"]:
+            scripts_info = ""
+            if prep_res["available_scripts"]:
+                scripts_info = f"""
+### Available Skill Scripts (in {prep_res['scripts_dir']})
+These scripts are ready to use. Call them with `python {prep_res['scripts_dir']}/<script_name>`:
+{chr(10).join(f'- {s}' for s in prep_res['available_scripts'])}
+"""
+            data_info = ""
+            if prep_res["data_files_info"]:
+                data_info = f"""
+### Previously Generated Data
+{prep_res['data_files_info']}
+You can read these files in your code for further analysis or visualization.
+"""
+
+            code_exec_block = f"""
+
+## Code Execution Available
+You can include executable code to collect REAL data, generate REAL figures, or run REAL analyses.
+Your working directory is: {prep_res['task_dir']}
+{scripts_info}{data_info}
+### How to include executable code
+Place code between these markers. Supported: python, bash.
+
+%%BEGIN CODE:python%%
+# Your Python code here
+# Save data to: {prep_res['task_dir']}/data/
+# Save figures to: {prep_res['task_dir']}/figures/
+%%END CODE%%
+
+%%BEGIN CODE:bash%%
+# Your bash commands here
+%%END CODE%%
+
+### Code Guidelines
+- Save data files (CSV, JSON) to `{prep_res['task_dir']}/data/`
+- Save figure files (PNG, PDF) to `{prep_res['task_dir']}/figures/`
+- For figures: use matplotlib with `plt.savefig()` — do NOT use `plt.show()`
+- Use descriptive filenames relating to the research topic
+- Available libraries: matplotlib, pandas, numpy, seaborn, requests, scipy
+- API tokens available as env vars: GITHUB_TOKEN, OPENROUTER_API_KEY, PERPLEXITY_API_KEY
+- Timeout: 300 seconds — keep code focused and efficient
+- Print a summary of collected/generated data to stdout
+- IMPORTANT: You MUST include code blocks to produce real data and figures. Do NOT just describe what code would do — actually write it so it runs.
+"""
+
         prompt = f"""You are executing a research skill as part of an autonomous scientist agent.
 
 ## Research Topic
@@ -318,7 +449,7 @@ Follow these instructions to produce your deliverable:
 ---
 {prep_res["skill_content"]}
 ---
-
+{code_exec_block}
 ## Citation Quality Requirements
 - Include references to real, well-known papers in the field.
 - Aim for breadth: cite multiple research groups, not just one lab.
@@ -355,7 +486,72 @@ Begin your work now."""
         skill_name = prep_res["skill_name"]
         track_cost(shared, f"execute_skill:{skill_name}", usage)
 
-        # Try %%BEGIN BIBTEX%% markers first (preferred), then fallback to extract_bibtex
+        # --- Extract and execute code blocks ---
+        code_outputs = []
+
+        if prep_res["can_execute"] and prep_res["task_dir"]:
+            task_dir = Path(prep_res["task_dir"])
+
+            # Ensure subdirs exist
+            (task_dir / "data").mkdir(exist_ok=True)
+            (task_dir / "figures").mkdir(exist_ok=True)
+            (task_dir / "scripts").mkdir(exist_ok=True)
+
+            # Extract code blocks: %%BEGIN CODE:lang%% ... %%END CODE%%
+            code_blocks = re.findall(
+                r"%%BEGIN CODE:(\w+)%%(.*?)%%END CODE%%", text, re.DOTALL
+            )
+
+            for i, (lang, code) in enumerate(code_blocks):
+                code = code.strip()
+                if not code:
+                    continue
+
+                # Write script to task_dir/scripts/
+                step_num = len(shared.get("history", [])) + 1
+                ext = ".py" if lang == "python" else ".sh"
+                script_path = task_dir / "scripts" / f"{step_num:02d}_{skill_name}_{i:02d}{ext}"
+                script_path.write_text(code, encoding="utf-8")
+
+                # Execute
+                cmd = ["python", str(script_path)] if lang == "python" else ["bash", str(script_path)]
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        cwd=str(task_dir),
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        timeout=300,
+                        env={**os.environ},
+                    )
+                    stdout = result.stdout[:3000]
+                    stderr = result.stderr[:1000]
+                    code_outputs.append(f"[Script {script_path.name}] exit={result.returncode}\n{stdout}")
+                    if result.returncode != 0:
+                        code_outputs.append(f"[STDERR] {stderr}")
+                    print(f"[ExecuteSkill] Ran {script_path.name}: exit={result.returncode}")
+                except subprocess.TimeoutExpired:
+                    code_outputs.append(f"[Script {script_path.name}] TIMEOUT after 300s")
+                    print(f"[ExecuteSkill] Script {script_path.name} timed out")
+                except Exception as e:
+                    code_outputs.append(f"[Script {script_path.name}] ERROR: {e}")
+                    print(f"[ExecuteSkill] Script {script_path.name} failed: {e}")
+
+            # Scan for generated files
+            generated_files = []
+            for subdir in ["data", "figures"]:
+                scan_dir = task_dir / subdir
+                if scan_dir.is_dir():
+                    for f in sorted(scan_dir.iterdir()):
+                        if f.is_file():
+                            generated_files.append(str(f))
+            if generated_files:
+                shared.setdefault("generated_files", {})[skill_name] = generated_files
+                for gf in generated_files:
+                    print(f"[ExecuteSkill] Generated: {gf}")
+
+        # --- Extract BibTeX ---
         bibtex_match = re.search(r"%%BEGIN BIBTEX%%(.*?)%%END BIBTEX%%", text, re.DOTALL)
         if bibtex_match:
             main_content = text[:bibtex_match.start()].strip()
@@ -366,6 +562,15 @@ Begin your work now."""
             # Fallback: try fenced code blocks and raw entries
             main_content, bib_entries = extract_bibtex(text)
 
+        # Remove code blocks from main content for cleaner artifact storage
+        main_content = re.sub(
+            r"%%BEGIN CODE:\w+%%.*?%%END CODE%%", "", main_content, flags=re.DOTALL
+        ).strip()
+
+        # Append code execution results to the artifact
+        if code_outputs:
+            main_content += "\n\n## Code Execution Results\n" + "\n".join(code_outputs)
+
         shared["artifacts"][skill_name] = main_content
         shared["bibtex_entries"].extend(bib_entries)
 
@@ -373,14 +578,33 @@ Begin your work now."""
         summary = main_content[:300].replace("\n", " ")
         if len(main_content) > 300:
             summary += "..."
+        step_num = len(shared["history"]) + 1
         shared["history"].append({
-            "step": len(shared["history"]) + 1,
+            "step": step_num,
             "skill": skill_name,
             "summary": summary,
             "cost": usage["cost"],
         })
 
+        # Persist full artifact and BibTeX to task directory
+        out_dir = Path(shared["output_path"])
+        artifact_dir = out_dir / "artifacts"
+        artifact_dir.mkdir(exist_ok=True)
+        artifact_file = artifact_dir / f"{step_num:02d}_{skill_name}.md"
+        artifact_file.write_text(main_content, encoding="utf-8")
+        if bib_entries:
+            bib_file = artifact_dir / f"{step_num:02d}_{skill_name}.bib"
+            bib_file.write_text("\n\n".join(bib_entries) + "\n", encoding="utf-8")
+
+        # Persist accumulated history snapshot
+        import json as _json
+        (out_dir / "history.json").write_text(
+            _json.dumps(shared["history"], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
         print(f"[ExecuteSkill] Completed: {skill_name} (${usage['cost']:.4f})")
+        print(f"[ExecuteSkill] Saved: {artifact_file.name}")
         print(f"[ExecuteSkill] BibTeX entries found: {len(bib_entries)}")
         print(f"[ExecuteSkill] Budget remaining: ${shared['budget_remaining']:.4f}")
         return "decide"
@@ -435,14 +659,33 @@ class WriteTeX(Node):
             if parts:
                 writing_guide = "\n\n".join(parts)
 
+        # Scan for generated figures
+        figure_files = []
+        out_dir = Path(shared.get("output_path", ""))
+        figures_dir = out_dir / "figures"
+        if figures_dir.is_dir():
+            for f in sorted(figures_dir.iterdir()):
+                if f.is_file() and f.suffix.lower() in (".png", ".pdf", ".jpg", ".jpeg"):
+                    figure_files.append(f.name)
+
+        # Scan for generated data files (for methods/results context)
+        data_files = []
+        data_dir = out_dir / "data"
+        if data_dir.is_dir():
+            for f in sorted(data_dir.iterdir()):
+                if f.is_file():
+                    data_files.append(f.name)
+
         return {
             "topic": shared["topic"],
             "artifacts": shared.get("artifacts", {}),
             "cite_keys": cite_keys,
-            "has_methods": has_methods,
-            "has_results": has_results,
+            "has_methods": has_methods or bool(data_files),
+            "has_results": has_results or bool(data_files),
             "report_type": report_type,
             "writing_guide": writing_guide,
+            "figure_files": figure_files,
+            "data_files": data_files,
         }
 
     def exec(self, prep_res):
@@ -474,6 +717,37 @@ You MUST follow these quality standards when writing. This is non-negotiable.
 {prep_res["writing_guide"]}
 """
 
+        # Build figure inclusion block
+        figure_block = ""
+        if prep_res.get("figure_files"):
+            figure_list = "\n".join(f"- {f}" for f in prep_res["figure_files"])
+            figure_block = f"""
+## Available Figures
+The following figures have been generated during research and are available for inclusion.
+You MUST include them in the paper where they support the narrative.
+{figure_list}
+
+To include a figure, use this LaTeX pattern:
+\\begin{{figure}}[htbp]
+\\centering
+\\includegraphics[width=0.8\\textwidth]{{figures/<filename>}}
+\\caption{{Your descriptive caption here.}}
+\\label{{fig:<short-label>}}
+\\end{{figure}}
+
+Reference each figure in the text as Figure~\\ref{{fig:<label>}}.
+"""
+
+        # Build data files context
+        data_block = ""
+        if prep_res.get("data_files"):
+            data_list = "\n".join(f"- {f}" for f in prep_res["data_files"])
+            data_block = f"""
+## Collected Data Files
+The following data files were collected during research. Reference their contents in your Methods and Results sections:
+{data_list}
+"""
+
         prompt = f"""You are writing a scientific {report_type.lower()} as compilable LaTeX.
 {quality_block}
 ## Research Topic
@@ -484,7 +758,7 @@ You MUST follow these quality standards when writing. This is non-negotiable.
 
 ## Available BibTeX cite keys
 {cite_list}
-
+{figure_block}{data_block}
 ## Report Type: {report_type}
 ## Sections to Write: {', '.join(sections)}
 
@@ -589,17 +863,14 @@ Write the report now."""
         # Deduplicate and write .bib
         bib_content = dedup_bibtex(shared.get("bibtex_entries", []))
 
-        # Create output directory
-        task_id = str(uuid.uuid4())
-        out_dir = Path(shared.get("output_dir", "outputs")) / task_id
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Use existing task directory (created by BudgetPlanner)
+        out_dir = Path(shared["output_path"])
 
         (out_dir / "report.tex").write_text(tex, encoding="utf-8")
         (out_dir / "references.bib").write_text(bib_content, encoding="utf-8")
 
         shared["tex_content"] = tex
         shared["bib_content"] = bib_content
-        shared["output_path"] = str(out_dir)
 
         # --- Citation validation ---
         cite_keys_in_tex = set(re.findall(r"\\cite\{([^}]+)\}", body))
@@ -681,8 +952,13 @@ class CompileTeX(Node):
             shared["has_citation_warnings"] = True
 
         if success:
-            if undefined_cites:
-                print(f"[CompileTeX] PDF compiled with citation warnings: {shared['output_path']}/report.pdf")
+            if undefined_cites and shared.get("fix_attempts", 0) < 2:
+                print(f"[CompileTeX] PDF has {len(unique_missing)} undefined citations, routing to fix...")
+                shared["compile_errors"] = log
+                shared["undefined_citations"] = unique_missing
+                return "fix"
+            elif undefined_cites:
+                print(f"[CompileTeX] PDF compiled with citation warnings (fix attempts exhausted): {shared['output_path']}/report.pdf")
             else:
                 print(f"[CompileTeX] PDF compiled successfully: {shared['output_path']}/report.pdf")
             return "done"
@@ -696,13 +972,17 @@ class CompileTeX(Node):
 # 6. FixTeX
 # ===================================================================
 class FixTeX(Node):
-    """Fix LaTeX compilation errors using the error log."""
+    """Fix LaTeX compilation errors or undefined citations."""
 
     def prep(self, shared):
+        undefined_cites = shared.get("undefined_citations", [])
         return {
             "tex_content": shared["tex_content"],
+            "bib_content": shared.get("bib_content", ""),
             "errors": shared.get("compile_errors", ""),
             "attempt": shared.get("fix_attempts", 0),
+            "undefined_citations": undefined_cites,
+            "mode": "citation" if undefined_cites else "latex_error",
         }
 
     def exec(self, prep_res):
@@ -710,14 +990,35 @@ class FixTeX(Node):
             # Give up after 2 fix attempts
             return None, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
 
-        # Extract just the error lines to save tokens
-        error_lines = []
-        for line in prep_res["errors"].split("\n"):
-            if line.startswith("!") or "Error" in line or "Undefined" in line:
-                error_lines.append(line)
-        error_summary = "\n".join(error_lines[:30])  # cap at 30 lines
+        if prep_res["mode"] == "citation":
+            # Citation fix mode: generate missing BibTeX entries
+            missing_keys = prep_res["undefined_citations"]
+            prompt = f"""The following BibTeX citation keys are used in a LaTeX document with \\cite{{key}} but are missing from the .bib file, causing [?] markers in the PDF.
 
-        prompt = f"""Fix these LaTeX compilation errors. Return the COMPLETE corrected .tex file content.
+## Missing Citation Keys
+{', '.join(missing_keys)}
+
+## Current .bib Content (for context, do NOT repeat existing entries)
+{prep_res["bib_content"][:3000]}
+
+## Instructions
+1. For EACH missing key listed above, generate a plausible BibTeX entry.
+2. Use the cite key EXACTLY as listed (do not rename it).
+3. Use realistic metadata: real author names, real paper titles, real venues.
+4. Each entry MUST have: author, title, year, and journal/booktitle.
+5. Return ONLY the new BibTeX entries, nothing else. No explanation text.
+6. Do not repeat entries already in the .bib file."""
+            text, usage = call_llm(prompt)
+            return text, usage
+        else:
+            # LaTeX error fix mode (original behavior)
+            error_lines = []
+            for line in prep_res["errors"].split("\n"):
+                if line.startswith("!") or "Error" in line or "Undefined" in line:
+                    error_lines.append(line)
+            error_summary = "\n".join(error_lines[:30])
+
+            prompt = f"""Fix these LaTeX compilation errors. Return the COMPLETE corrected .tex file content.
 
 ## Errors
 {error_summary}
@@ -730,8 +1031,8 @@ class FixTeX(Node):
 2. Only fix the errors in the body content.
 3. Common fixes: escape special chars (%, &, #, $, _), close environments, fix undefined commands.
 4. Return ONLY the complete .tex file, nothing else."""
-        text, usage = call_llm(prompt)
-        return text, usage
+            text, usage = call_llm(prompt)
+            return text, usage
 
     def post(self, shared, prep_res, exec_res):
         text, usage = exec_res
@@ -751,13 +1052,34 @@ class FixTeX(Node):
             cleaned = re.sub(r"^```\w*\n?", "", cleaned)
             cleaned = re.sub(r"\n?```$", "", cleaned)
 
-        # Write fixed .tex
-        out_dir = Path(shared["output_path"])
-        (out_dir / "report.tex").write_text(cleaned, encoding="utf-8")
-        shared["tex_content"] = cleaned
+        if prep_res["mode"] == "citation":
+            # Citation fix: parse new entries, validate, and update .bib
+            new_entries = re.findall(r"(@\w+\{[^@]+)", cleaned, re.DOTALL)
+            new_entries = [e.strip() for e in new_entries if e.strip()]
 
-        print(f"[FixTeX] Applied fix (attempt {shared['fix_attempts']})")
-        return "compile"
+            if new_entries:
+                all_entries = shared.get("bibtex_entries", []) + new_entries
+                combined = dedup_bibtex(all_entries)
+
+                out_dir = Path(shared["output_path"])
+                (out_dir / "references.bib").write_text(combined, encoding="utf-8")
+                shared["bib_content"] = combined
+                shared["bibtex_entries"] = all_entries
+
+                print(f"[FixTeX] Added {len(new_entries)} BibTeX entries for undefined citations")
+
+            # Clear flag so CompileTeX re-evaluates from scratch
+            shared.pop("undefined_citations", None)
+            print(f"[FixTeX] Citation fix applied (attempt {shared['fix_attempts']})")
+            return "compile"
+        else:
+            # LaTeX error fix: rewrite .tex
+            out_dir = Path(shared["output_path"])
+            (out_dir / "report.tex").write_text(cleaned, encoding="utf-8")
+            shared["tex_content"] = cleaned
+
+            print(f"[FixTeX] Applied fix (attempt {shared['fix_attempts']})")
+            return "compile"
 
 
 # ===================================================================
@@ -773,7 +1095,37 @@ class Finisher(Node):
         return None
 
     def post(self, shared, prep_res, exec_res):
+        import json as _json
+        from datetime import datetime, timezone
+
         total = sum(entry["cost"] for entry in shared.get("cost_log", []))
+        out_dir = Path(shared["output_path"])
+
+        # Persist cost log
+        (out_dir / "cost_log.json").write_text(
+            _json.dumps(shared.get("cost_log", []), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # Persist final summary for post-analysis
+        summary = {
+            "topic": shared.get("topic", ""),
+            "domain": shared.get("domain", ""),
+            "report_type": shared.get("report_type", ""),
+            "budget_dollars": shared.get("budget_dollars", 0),
+            "total_cost": round(total, 6),
+            "budget_remaining": round(shared.get("budget_remaining", 0), 6),
+            "steps_executed": len(shared.get("history", [])),
+            "artifacts": list(shared.get("artifacts", {}).keys()),
+            "bibtex_count": len(shared.get("bibtex_entries", [])),
+            "fix_attempts": shared.get("fix_attempts", 0),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (out_dir / "summary.json").write_text(
+            _json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
         print(f"\n{'='*50}")
         print(f"Research complete!")
         print(f"Total cost: ${total:.4f}")
