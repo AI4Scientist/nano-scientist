@@ -54,9 +54,9 @@ def format_available_keys(keys: dict[str, bool]) -> str:
     return "\n".join(lines)
 
 # --- LLM Configuration ---
-MODEL = "minimax/minimax-m2.5"
-INPUT_COST_PER_M = 0.30   # $/M input tokens
-OUTPUT_COST_PER_M = 1.10  # $/M output tokens
+MODEL = "z-ai/glm-5"
+INPUT_COST_PER_M = 0.95   # $/M input tokens
+OUTPUT_COST_PER_M = 2.55  # $/M output tokens
 
 
 def get_client() -> OpenAI:

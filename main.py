@@ -91,8 +91,8 @@ Examples:
         help="Research topic string OR path to a YAML plan file",
     )
     parser.add_argument(
-        "--budget", "-b", type=float, default=1.0,
-        help="Budget in USD for LLM inference (default: $1.00)",
+        "--budget", "-b", type=float, default=5.0,
+        help="Budget in USD for LLM inference (default: $5.00)",
     )
     parser.add_argument(
         "--output", "-o", default="outputs",
