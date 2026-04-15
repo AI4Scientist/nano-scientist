@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-Autonomous research agent. Takes a topic + dollar budget, runs a skill loop, outputs a compiled PDF paper.
+Autonomous research agent. Takes a topic + dollar budget, runs research/writing/review loops, outputs a compiled PDF.
 
 ## Run
 ```bash
@@ -9,34 +9,61 @@ python main.py "topic" --budget 1.00
 python main.py --list-skills
 ```
 
+## Pipeline
+```
+Initializer
+  → ResearchExecutor (loop)
+  → WritingExecutor (loop)
+  → ReviewExecutor → [research / write / compile]
+  → CompileTeX ↔ FixTeX → Finisher
+```
+ReviewExecutor dispatches revisions directly into the research/writing loops.
+LaTeX compilation runs **exactly once**, as the final PDF generation step.
+
 ## Architecture
-- **Entry**: `main.py` → `src/flow.py` → `src/nodes.py`
-- **Flow**: `BudgetPlanner → DecideNext ↔ ExecuteSkill → WriteTeX → CompileTeX ↔ FixTeX → Finisher`
-- **Skills**: `skills/<name>/SKILL.md` — lazy-loaded by `ExecuteSkill`; index in `skills/skills.json`
-- **LLM**: OpenRouter via `src/utils.py:call_llm()` — model `z-ai/glm-5`, ~$0.005/call
-- **Budget guard**: `BUDGET_RESERVE = 0.03` in `nodes.py` — reserved for final report
+
+| Node | Role |
+|---|---|
+| **Initializer** | Zero LLM calls — infers report type from budget, creates `outputs/<uuid>/` |
+| **ResearchExecutor** | Autonomous loop: picks one skill → inline decompose (2–5 steps) → execute; self-loops until budget threshold; *scoped mode*: runs a single revision-directed skill then exits to `write` |
+| **WritingExecutor** | Autonomous loop: picks one section → writes LaTeX; self-loops until all sections done; *scoped mode*: rewrites one targeted section then exits to `review` |
+| **ReviewExecutor** | Assembles fresh draft, runs peer-review; dispatches top major comment → `research` / `write`; returns `compile` when accepted; controlled by `MAX_REVIEW_ROUNDS` (default 1) |
+| **CompileTeX** | `pdflatex` + `bibtex` pipeline; up to 2 fix attempts |
+| **FixTeX** | Patches citation or LaTeX errors, retries compile |
+| **Finisher** | Writes `cost_log.json` + `summary.json`, prints total cost |
 
 ## Key files
 | File | Role |
 |---|---|
-| `src/nodes.py` | All 7 agent nodes |
+| `src/nodes.py` | 7 nodes + module-level helpers (`_run_skill`, `_write_section`, `_assemble_tex`, `_artifact_index`, `_recent_history`, `_run_code_blocks`, `_save_artifact`) |
 | `src/flow.py` | PocketFlow wiring |
-| `src/utils.py` | LLM client, cost tracking, BibTeX utils |
+| `src/utils.py` | LLM client, tiktoken counter, cost tracking, BibTeX utils |
 | `skills/skills.json` | Skill index (id + description) |
-| `docs/PAPER_QUALITY_STANDARD.md` | Writing quality guide injected into prompts |
+| `docs/PAPER_QUALITY_STANDARD.md` | Writing quality guide |
 
 ## Shared store keys
-`topic`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `plan`, `history`, `artifacts`, `bibtex_entries`, `generated_files`, `decisions`, `report_type`, `domain`, `quality_standard`, `api_keys`
+`topic`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `report_type`, `history`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `failed_code`, `review_rounds`, `review_comments`, `addressed_comments`, `revision_scope`, `fix_attempts`, `api_keys`
 
-## Adding a skill
-1. Create `skills/<name>/SKILL.md` with YAML frontmatter (`id`, `description`, optionally `allowed-tools: Bash`)
-2. Add `{"id": "<name>", "description": "..."}` to `skills/skills.json`
+## Budget reserves
+| Constant | Value | Purpose |
+|---|---|---|
+| `BUDGET_RESERVE` | $0.03 | research → writing threshold |
+| `WRITE_RESERVE` | $0.015 | writing → review threshold |
+| `REVIEW_RESERVE` | $0.008 | skip revision if below |
 
 ## Environment
-Required: `OPENROUTER_API_KEY`. Optional: `PERPLEXITY_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`. All in `.env`.
+Required: `OPENROUTER_API_KEY`, `HF_TOKEN`, `GITHUB_TOKEN`.
+Optional: `PERPLEXITY_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITLAB_TOKEN`.
+Inference: `MODEL_NAME`, `INFERENCE_BASE_URL`, `INPUT_TOKEN_COST_PER_MILLION`, `OUTPUT_TOKEN_COST_PER_MILLION`.
+Agent: `LOOKBACK` (default 3), `MAX_REVIEW_ROUNDS` (default 1).
 
 ## Conventions
-- Skills missing required API keys are auto-excluded from the plan
-- Skill code blocks (`%%BEGIN CODE:python%%...%%END CODE%%`) execute in the task output directory
-- BibTeX collected per-skill via `%%BEGIN BIBTEX%%...%%END BIBTEX%%`, deduplicated by `dedup_bibtex()`
-- Output goes to `outputs/<uuid>/` — do not commit this directory
+- Skills: `skills/<name>/SKILL.md` — lazy-loaded; index in `skills/skills.json`
+- Code blocks (`%%BEGIN CODE:python%%...%%END CODE%%`) execute in task dir (requires `allowed-tools: Bash`)
+- BibTeX via `%%BEGIN BIBTEX%%...%%END BIBTEX%%`, deduplicated by `dedup_bibtex()`
+- Sections via `%%BEGIN SECTION%%...%%END SECTION%%`
+- Output: `outputs/<uuid>/` — do not commit
+
+## Adding a skill
+1. `skills/<name>/SKILL.md` with YAML frontmatter (`id`, `description`, optionally `allowed-tools: Bash`)
+2. `{"id": "<name>", "description": "..."}` in `skills/skills.json`

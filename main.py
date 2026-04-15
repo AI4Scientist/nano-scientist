@@ -11,7 +11,7 @@ import argparse
 import sys
 
 from pathlib import Path
-from src.utils import init_env, load_skill_index, load_quality_standard, detect_api_keys, format_available_keys
+from src.utils import init_env, load_skill_index, detect_api_keys
 from src.flow import create_scientist_flow
 
 # Resolve project paths
@@ -34,11 +34,6 @@ def run(topic: str, budget: float, output_dir: str):
     skill_index = load_skill_index(str(SKILLS_DIR))
     print(f"Loaded {len(skill_index)} skills from skills.json")
 
-    # Load paper quality standard (guides all writing nodes)
-    quality_standard = load_quality_standard("docs")
-    if quality_standard:
-        print(f"Loaded paper quality standard from docs/PAPER_QUALITY_STANDARD.md")
-
     # Detect available API keys so the scientist knows its capabilities
     api_keys = detect_api_keys()
     available = [k for k, v in api_keys.items() if v]
@@ -56,7 +51,6 @@ def run(topic: str, budget: float, output_dir: str):
         "skill_index": skill_index,       # lightweight: {name: description}
         "skills_dir": str(SKILLS_DIR),    # path for lazy-loading SKILL.md
         "output_dir": output_dir,
-        "quality_standard": quality_standard,
         "api_keys": api_keys,             # {key_name: is_set} for capability awareness
     }
 
@@ -88,7 +82,7 @@ Examples:
     )
     parser.add_argument(
         "topic", nargs="?",
-        help="Research topic string OR path to a YAML plan file",
+        help="Research topic string OR path to a .md file",
     )
     parser.add_argument(
         "--budget", "-b", type=float, default=5.0,

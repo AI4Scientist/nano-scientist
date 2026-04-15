@@ -1,12 +1,22 @@
-"""Flow wiring for the Autonomous Scientist agent."""
+"""Flow wiring for the Autonomous Scientist agent.
+
+Pipeline:
+  Initializer
+    → ResearchExecutor (loop) → WritingExecutor (loop)
+    → ReviewExecutor → [research / write / compile]
+    → CompileTeX ↔ FixTeX → Finisher
+
+Review dispatches revisions directly into the research/writing loops.
+LaTeX compilation happens exactly once, as the final PDF generation step.
+"""
 
 from pocketflow import Flow
 
 from .nodes import (
-    BudgetPlanner,
-    DecideNext,
-    ExecuteSkill,
-    WriteTeX,
+    Initializer,
+    ResearchExecutor,
+    WritingExecutor,
+    ReviewExecutor,
     CompileTeX,
     FixTeX,
     Finisher,
@@ -14,36 +24,34 @@ from .nodes import (
 
 
 def create_scientist_flow() -> Flow:
-    """Create and wire the autonomous scientist flow.
+    init     = Initializer()
+    research = ResearchExecutor(max_retries=2, wait=5)
+    writing  = WritingExecutor(max_retries=2, wait=5)
+    review   = ReviewExecutor(max_retries=2, wait=5)
+    compile  = CompileTeX(max_retries=1, wait=0)
+    fix_tex  = FixTeX(max_retries=2, wait=3)
+    finisher = Finisher()
 
-    Flow diagram (minimalist):
-        BudgetPlanner → DecideNext ↔ ExecuteSkill (loop)
-                           ↓
-                        WriteTeX → CompileTeX ↔ FixTeX (loop)
-                                       ↓
-                                    Finisher
-    """
-    planner       = BudgetPlanner(max_retries=5, wait=3)
-    decide        = DecideNext(max_retries=2, wait=3)
-    execute_skill = ExecuteSkill(max_retries=2, wait=5)
-    write_tex     = WriteTeX(max_retries=2, wait=3)
-    compile_tex   = CompileTeX(max_retries=1, wait=0)
-    fix_tex       = FixTeX(max_retries=2, wait=3)
-    finisher      = Finisher()
+    # Entry
+    init     - "research" >> research
 
-    # Agent loop: collect data via skills
-    planner - "execute"       >> decide
-    decide  - "execute_skill" >> execute_skill
-    decide  - "write_tex"     >> write_tex
-    execute_skill - "decide"  >> decide
+    # Research loop
+    research - "research" >> research
+    research - "write"    >> writing
 
-    # Writing → compilation
-    write_tex   - "compile" >> compile_tex
+    # Writing loop
+    writing  - "write"    >> writing
+    writing  - "review"   >> review
 
-    # Compile & fix loop
-    compile_tex - "fix"     >> fix_tex
-    compile_tex - "done"    >> finisher
-    fix_tex     - "compile" >> compile_tex
-    fix_tex     - "done"    >> finisher
+    # Review dispatches revisions directly or proceeds to compile
+    review   - "research" >> research
+    review   - "write"    >> writing
+    review   - "compile"  >> compile
 
-    return Flow(start=planner)
+    # Final PDF generation (runs exactly once)
+    compile  - "fix"      >> fix_tex
+    compile  - "done"     >> finisher
+    fix_tex  - "compile"  >> compile
+    fix_tex  - "done"     >> finisher
+
+    return Flow(start=init)

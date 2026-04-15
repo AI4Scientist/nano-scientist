@@ -1,20 +1,23 @@
 # Nanoscientist
 
-> **Nano. Lean. One loop, one metric, one paper.**
+> **Nano. Lean. Two loops, one budget, one paper.**
 
-An autonomous research agent that turns a topic into a compiled PDF — within a dollar budget you set. The entire agent is ~4 files, ~7 nodes, ~20 skills. No framework bloat, no orchestration overhead.
+An autonomous research agent that turns a topic into a peer-reviewed, compiled PDF — within a dollar budget you set. The entire agent is ~4 files, 7 nodes, ~20 skills. No framework bloat, no orchestration overhead.
 
-Built on [PocketFlow](https://github.com/The-Pocket/PocketFlow). Directly inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch): fix the budget, run the loop, let the agent figure out the rest.
+Built on [PocketFlow](https://github.com/The-Pocket/PocketFlow). Directly inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch): fix the budget, run the loops, let the agent figure out the rest.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    BP[BudgetPlanner] --> DN[DecideNext]
-    DN -->|execute_skill| ES[ExecuteSkill]
-    ES -->|decide| DN
-    DN -->|write_tex| WT[WriteTeX]
-    WT --> CT[CompileTeX]
+    I[Initializer] -->|research| RE[ResearchExecutor]
+    RE -->|research| RE
+    RE -->|write| WE[WritingExecutor]
+    WE -->|write| WE
+    WE -->|review| RV[ReviewExecutor]
+    RV -->|research| RE
+    RV -->|write| WE
+    RV -->|compile| CT[CompileTeX]
     CT -->|fix| FT[FixTeX]
     FT -->|compile| CT
     CT -->|done| F[Finisher]
@@ -23,16 +26,17 @@ flowchart LR
 
 | Stage | What happens |
 |---|---|
-| **BudgetPlanner** | Reads the topic + budget, emits a prioritised skill plan |
-| **DecideNext** | Picks the next skill or decides the research is deep enough to write |
-| **ExecuteSkill** | Loads the skill's `SKILL.md`, runs it via LLM, executes any code blocks, collects BibTeX |
-| **WriteTeX** | Synthesises all artifacts into a `.tex` + `.bib` report |
-| **CompileTeX** | Runs `pdflatex` + `bibtex` to produce a PDF |
+| **Initializer** | Infers report type from budget, sets up `outputs/<uuid>/` — zero LLM calls |
+| **ResearchExecutor** | Autonomous loop: picks one skill per iteration, decomposes it inline (2–5 steps), executes; self-loops until budget threshold; supports *scoped mode* for revision-directed research |
+| **WritingExecutor** | Autonomous loop: picks one section per iteration, writes LaTeX; self-loops until all sections done; supports *scoped mode* for targeted rewrites |
+| **ReviewExecutor** | Assembles the full draft and runs peer-review; dispatches the top major comment directly to research or rewrite; returns `compile` when the draft is accepted |
+| **CompileTeX** | Runs `pdflatex` + `bibtex` to produce a PDF — runs **exactly once**, as the final step |
 | **FixTeX** | Patches undefined citations or LaTeX errors and recompiles |
+| **Finisher** | Writes `cost_log.json` + `summary.json`, prints total cost |
 
-**Why nano?** The core is intentionally tiny — 4 source files, ~800 lines total. Each skill is a single markdown file read on demand. No databases, no queues, no config YAML. The budget is the only knob.
+**Why nano?** The core is intentionally tiny — 4 source files, ~1,100 lines total. Three mandatory stages (Research → Write → Review) with the review node handling revision dispatch directly. The budget is the only knob.
 
-Each skill call costs ~$0.005; the final report ~$0.01. The agent runs until the budget is spent, then writes.
+Each skill call costs ~$0.005; the final report ~$0.01. The agent runs until the budget is spent, reviews the draft, and compiles the PDF.
 
 ## Quickstart
 
@@ -52,13 +56,12 @@ cp .env.example .env
 python main.py "CRISPR off-target effects in primary T cells" --budget 1.00
 ```
 
-Output lands in `outputs/<task-id>/`:
+Output lands in `outputs/<uuid>/`:
 
 ```
 outputs/
 └── <uuid>/
-    ├── plan.yaml          # skill execution plan
-    ├── report.tex         # compiled LaTeX source
+    ├── report.tex         # assembled LaTeX source
     ├── report.pdf         # final PDF (if pdflatex installed)
     ├── references.bib     # deduplicated BibTeX
     ├── artifacts/         # per-skill markdown outputs
@@ -66,8 +69,8 @@ outputs/
     ├── data/              # collected CSV / JSON data
     ├── scripts/           # executed code blocks
     ├── history.json       # step-by-step execution log
-    ├── decisions.json     # DecideNext action log
-    └── cost_log.json      # per-step token costs
+    ├── cost_log.json      # per-step token costs
+    └── summary.json       # final run summary
 ```
 
 ## CLI reference
@@ -87,13 +90,15 @@ Options:
 
 **Budget tiers**
 
-| Budget | Report type | Approx. skill calls |
-|---|---|---|
-| < $0.10 | Quick Summary | 1–2 |
-| $0.10 – $0.50 | Literature Review | 3–6 |
-| $0.50 – $2.00 | Research Report | 10–20 |
-| $2.00 – $5.00 | Full Paper | 30–50 |
-| $5.00+ | Full Paper (exhaustive) | 50+ |
+Report type is inferred from budget at startup. Actual cost depends on model pricing, skill mix, and how many review/revision cycles occur.
+
+| Budget | Report type | Sections | Notes |
+|---|---|---|---|
+| < $0.10 | Quick Summary | 4 | 1–2 skill calls; minimal citations |
+| $0.10 – $0.50 | Literature Review | 5 | several skill calls; may exhaust budget before all sections written |
+| $0.50 – $2.00 | Research Report | 7 | typical run with methods + results |
+| $2.00 – $5.00 | Full Paper | 8 | multiple review/revision cycles possible |
+| $5.00+ | Full Paper | 8 | extended research depth; more skills, more citations |
 
 ## Skills
 
@@ -129,14 +134,13 @@ Skills that require code execution declare `allowed-tools: Bash` in their frontm
 | Variable | Required | Used for |
 |---|---|---|
 | `OPENROUTER_API_KEY` | **Yes** | Core LLM inference (all nodes) |
+| `HF_TOKEN` | **Yes** | `tooluniverse` (Hugging Face model/dataset discovery) |
+| `GITHUB_TOKEN` | **Yes** | `github-mining` (code/repo search) |
 | `PERPLEXITY_API_KEY` | Recommended | `research-lookup` real-time web search |
 | `ANTHROPIC_API_KEY` | Optional | Claude models via OpenRouter |
 | `OPENAI_API_KEY` | Optional | OpenAI models, `paper-2-web` |
-| `HF_TOKEN` | Optional | `tooluniverse` (Hugging Face) |
-| `GITHUB_TOKEN` | Optional | `github-mining` |
-| `GITLAB_TOKEN` | Optional | GitLab access |
 
-Copy `.env.example` and fill in what you have. Skills that need a missing key are automatically excluded from the plan.
+Copy `.env.example` and fill in what you have. Skills that need a missing key are automatically skipped.
 
 ## Project layout
 
@@ -144,13 +148,13 @@ Copy `.env.example` and fill in what you have. Skills that need a missing key ar
 nanoscientist/
 ├── main.py              # CLI entry point
 ├── src/
-│   ├── flow.py          # PocketFlow wiring
-│   ├── nodes.py         # 7 agent nodes
+│   ├── flow.py          # PocketFlow wiring (7 nodes)
+│   ├── nodes.py         # 7 agent nodes + module-level helpers
 │   └── utils.py         # LLM client, cost tracking, BibTeX utils
 ├── skills/              # 20 modular research skills
+│   ├── skills.json      # skill index (id + description)
 │   └── <skill-name>/
-│       ├── SKILL.md     # instructions read by ExecuteSkill
-│       └── scripts/     # optional helper Python scripts
+│       └── SKILL.md     # instructions + optional YAML frontmatter
 ├── docs/
 │   └── PAPER_QUALITY_STANDARD.md
 ├── outputs/             # generated reports (git-ignored)

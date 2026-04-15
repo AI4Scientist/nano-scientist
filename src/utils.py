@@ -8,6 +8,12 @@ from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
+try:
+    import tiktoken
+    _TIKTOKEN_AVAILABLE = True
+except ImportError:
+    _TIKTOKEN_AVAILABLE = False
+
 
 def init_env(env_path: str = None):
     """Load environment variables from the specified .env file.
@@ -24,14 +30,16 @@ def init_env(env_path: str = None):
 
 # --- API Key Registry ---
 # Maps environment variable names to what they unlock for the scientist.
+# Keys marked [REQUIRED] must be set — the agent cannot function without them.
 API_KEY_REGISTRY = {
-    "OPENROUTER_API_KEY": "Core LLM inference, research-lookup, generate-image, scientific-schematics, scientific-slides, paper-2-web",
-    "ANTHROPIC_API_KEY": "Anthropic Claude models",
-    "PERPLEXITY_API_KEY": "Perplexity Sonar search (used by research-lookup)",
-    "OPENAI_API_KEY": "OpenAI models, paper-2-web",
-    "HF_TOKEN": "Hugging Face models and datasets (used by tooluniverse)",
-    "GITHUB_TOKEN": "GitHub API access",
-    "GITLAB_TOKEN": "GitLab API access",
+    # --- REQUIRED ---
+    "OPENROUTER_API_KEY": "[REQUIRED] Core LLM inference — every node calls the LLM through OpenRouter; without this key the agent cannot run at all",
+    "HF_TOKEN":           "[REQUIRED] Hugging Face Hub — needed for tooluniverse skill (model/dataset discovery); without this key tooluniverse cannot be used",
+    "GITHUB_TOKEN":       "[REQUIRED] GitHub API — needed for github-mining skill (code/repo search); without this key github-mining cannot be used",
+    # --- OPTIONAL ---
+    "PERPLEXITY_API_KEY": "Perplexity Sonar real-time web search — used by research-lookup for up-to-date citations",
+    "ANTHROPIC_API_KEY":  "Anthropic Claude models via OpenRouter",
+    "OPENAI_API_KEY":     "OpenAI models and paper-2-web HTML export",
 }
 
 
@@ -53,17 +61,60 @@ def format_available_keys(keys: dict[str, bool]) -> str:
         lines.append(f"- {key}: {status} — {desc}")
     return "\n".join(lines)
 
-# --- LLM Configuration ---
-MODEL = "z-ai/glm-5"
-INPUT_COST_PER_M = 0.95   # $/M input tokens
-OUTPUT_COST_PER_M = 2.55  # $/M output tokens
+# --- LLM Configuration (read from env, fall back to defaults) ---
+def _get_model() -> str:
+    return os.environ.get("MODEL_NAME", "z-ai/glm-5")
+
+def _get_input_cost() -> float:
+    return float(os.environ.get("INPUT_TOKEN_COST_PER_MILLION", "0.95"))
+
+def _get_output_cost() -> float:
+    return float(os.environ.get("OUTPUT_TOKEN_COST_PER_MILLION", "2.55"))
+
+def _get_base_url() -> str:
+    return os.environ.get("INFERENCE_BASE_URL", "https://openrouter.ai/api/v1")
+
+
+# --- Token counting ---
+_tiktoken_enc = None
+
+def count_tokens(text: str) -> int:
+    """Count tokens in text using tiktoken (cl100k_base encoding).
+
+    Falls back to rough word-based estimate if tiktoken is not installed.
+    """
+    global _tiktoken_enc
+    if _TIKTOKEN_AVAILABLE:
+        if _tiktoken_enc is None:
+            _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
+        return len(_tiktoken_enc.encode(text))
+    # Fallback: ~1.3 tokens per word (rough estimate)
+    return int(len(text.split()) * 1.3)
+
+
+def estimate_calls_remaining(budget_remaining: float, avg_prompt_tokens: int = 500, avg_output_tokens: int = 300) -> int:
+    """Estimate how many LLM calls remain given current budget."""
+    cost_per_call = (
+        avg_prompt_tokens * _get_input_cost() / 1_000_000
+        + avg_output_tokens * _get_output_cost() / 1_000_000
+    )
+    if cost_per_call <= 0:
+        return 0
+    return max(0, int(budget_remaining / cost_per_call))
+
+
+# Persistent system prompt injected into every LLM call
+_SYSTEM_PROMPT_TEMPLATE = (
+    "You are an autonomous research assistant. "
+    "Your final goal is to generate a high-quality technical report on the assigned topic. "
+    "Budget remaining: ${budget:.4f} (~{calls} calls left at current rate). "
+    "Be concise and prioritise information density. "
+    "Every token costs money — avoid padding, repetition, or lengthy preambles."
+)
 
 
 def get_client() -> OpenAI:
-    """Create OpenRouter-compatible OpenAI client.
-
-    Looks for OPENROUTER_API_KEY in environment / .env.
-    """
+    """Create OpenAI-compatible client from env config."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError(
@@ -73,40 +124,62 @@ def get_client() -> OpenAI:
             "Get one at https://openrouter.ai/keys"
         )
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url=_get_base_url(),
         api_key=api_key,
     )
 
 
-def call_llm(prompt: str, system: str = None) -> tuple[str, dict]:
+def call_llm(
+    prompt: str,
+    system: str = None,
+    budget_remaining: float = None,
+) -> tuple[str, dict]:
     """Call the LLM and return (response_text, usage_dict).
 
-    usage_dict has keys: input_tokens, output_tokens, cost
+    Injects a budget-aware system prompt. If `system` is provided it is
+    appended after the injected preamble so callers can still pass node-
+    specific instructions.
+
+    usage_dict keys: input_tokens, output_tokens, cost, estimated_input_tokens
     """
-    client = get_client()
-    messages = []
+    # Build system message with budget context
+    calls_left = estimate_calls_remaining(budget_remaining or 0)
+    budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(
+        budget=budget_remaining or 0.0,
+        calls=calls_left,
+    )
+    full_system = budget_ctx
     if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+        full_system = budget_ctx + "\n\n" + system
+
+    # Estimate tokens before API call (for logging/debugging)
+    est_input = count_tokens(full_system) + count_tokens(prompt)
+
+    client = get_client()
+    messages = [
+        {"role": "system", "content": full_system},
+        {"role": "user", "content": prompt},
+    ]
 
     response = client.chat.completions.create(
-        model=MODEL,
+        model=_get_model(),
         messages=messages,
     )
 
     text = response.choices[0].message.content or ""
     usage = response.usage
-    input_tokens = usage.prompt_tokens if usage else 0
-    output_tokens = usage.completion_tokens if usage else 0
+    input_tokens = usage.prompt_tokens if usage else est_input
+    output_tokens = usage.completion_tokens if usage else count_tokens(text)
     cost = (
-        input_tokens * INPUT_COST_PER_M / 1_000_000
-        + output_tokens * OUTPUT_COST_PER_M / 1_000_000
+        input_tokens * _get_input_cost() / 1_000_000
+        + output_tokens * _get_output_cost() / 1_000_000
     )
 
     return text, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost": cost,
+        "estimated_input_tokens": est_input,
     }
 
 
@@ -270,17 +343,6 @@ def dedup_bibtex(entries: list[str]) -> str:
     if rejected:
         print(f"[dedup_bibtex] Rejected {rejected} invalid BibTeX entries")
     return "\n\n".join(seen.values()) + "\n" if seen else ""
-
-
-def load_quality_standard(docs_dir: str = "docs") -> str:
-    """Load the paper quality standard from docs/PAPER_QUALITY_STANDARD.md.
-
-    Returns the full text, which nodes can excerpt as needed for prompts.
-    """
-    std_path = Path(docs_dir) / "PAPER_QUALITY_STANDARD.md"
-    if not std_path.exists():
-        return ""
-    return std_path.read_text(encoding="utf-8")
 
 
 def track_cost(shared: dict, step: str, usage: dict):
