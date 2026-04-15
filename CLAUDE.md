@@ -37,7 +37,7 @@ LaTeX compilation runs **exactly once**, as the final PDF generation step.
 |---|---|
 | `src/nodes.py` | 7 nodes + module-level helpers (`_run_skill`, `_write_section`, `_assemble_tex`, `_artifact_index`, `_recent_history`, `_run_code_blocks`, `_save_artifact`) |
 | `src/flow.py` | PocketFlow wiring |
-| `src/utils.py` | LLM client, tiktoken counter, cost tracking, BibTeX utils |
+| `src/utils.py` | LLM client (`call_llm`, `call_llm_with_tools`), tiktoken counter, cost tracking, BibTeX utils, skill index loading/filtering |
 | `skills/skills.json` | Skill index (id + description) |
 | `docs/PAPER_QUALITY_STANDARD.md` | Writing quality guide |
 
@@ -52,17 +52,24 @@ LaTeX compilation runs **exactly once**, as the final PDF generation step.
 | `REVIEW_RESERVE` | $0.008 | skip revision if below |
 
 ## Environment
-Required: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`, `GITHUB_TOKEN`.
+Required: `OPENROUTER_API_KEY` (all nodes).
+Optional (skill-gated): `HF_TOKEN` (`tooluniverse`), `GITHUB_TOKEN` (`github-mining`), `OPENAI_API_KEY` (`paper-2-web`).
 Inference: `MODEL_NAME`, `INFERENCE_BASE_URL`, `INPUT_TOKEN_COST_PER_MILLION`, `OUTPUT_TOKEN_COST_PER_MILLION`.
 Agent: `LOOKBACK` (default 3), `MAX_REVIEW_ROUNDS` (default 1).
 
 ## Conventions
 - Skills: `skills/<name>/SKILL.md` — lazy-loaded; index in `skills/skills.json`
-- Code blocks (`%%BEGIN CODE:python%%...%%END CODE%%`) execute in task dir (requires `allowed-tools: Bash`)
+- Skills with `allowed-tools: Bash` get a real tool-calling loop via `call_llm_with_tools`: the model drives bash execution, sees stdout/stderr, and can retry on error (up to 8 rounds)
+- Skills without `allowed-tools` use plain `call_llm` (no tools exposed)
 - BibTeX via `%%BEGIN BIBTEX%%...%%END BIBTEX%%`, deduplicated by `dedup_bibtex()`
 - Sections via `%%BEGIN SECTION%%...%%END SECTION%%`
+- `required-keys` frontmatter field declares which API keys a skill needs; skills are filtered out at startup if the key is missing
 - Output: `outputs/<uuid>/` — do not commit
 
 ## Adding a skill
-1. `skills/<name>/SKILL.md` with YAML frontmatter (`id`, `description`, optionally `allowed-tools: Bash`)
+1. `skills/<name>/SKILL.md` with YAML frontmatter:
+   - `id`: skill name
+   - `description`: shown in planner
+   - `allowed-tools: Bash` — grants real bash tool access with error feedback loop
+   - `required-keys: [KEY_NAME]` — skill filtered out at startup if key missing
 2. `{"id": "<name>", "description": "..."}` in `skills/skills.json`

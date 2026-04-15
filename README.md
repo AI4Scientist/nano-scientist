@@ -133,16 +133,14 @@ Skills that require code execution declare `allowed-tools: Bash` in their frontm
 
 ## Environment variables
 
-All four variables are required:
+| Variable | Required | Used for |
+|---|---|---|
+| `OPENROUTER_API_KEY` | **Yes** | Core LLM inference (all nodes) |
+| `HF_TOKEN` | Skill-gated | `tooluniverse` (Hugging Face discovery) |
+| `GITHUB_TOKEN` | Skill-gated | `github-mining` (code/repo search) |
+| `OPENAI_API_KEY` | Skill-gated | `paper-2-web` (HTML/video/poster export) |
 
-| Variable | Used for |
-|---|---|
-| `OPENROUTER_API_KEY` | Core LLM inference (all nodes) |
-| `HF_TOKEN` | `tooluniverse` (Hugging Face discovery) |
-| `GITHUB_TOKEN` | `github-mining` (code/repo search) |
-| `OPENAI_API_KEY` | OpenAI models, `paper-2-web` |
-
-Copy `.env.example` to `.env` and fill in all four keys.
+Only `OPENROUTER_API_KEY` is strictly required. Skills whose required key is missing are automatically filtered out at startup — the agent runs with whatever skills are available. Copy `.env.example` to `.env` and set the keys you have.
 
 ## Project layout
 
@@ -171,7 +169,8 @@ nanoscientist/
 ---
 id: my-skill
 description: One-line description shown in the planner.
-allowed-tools: Bash   # omit if no code execution needed
+allowed-tools: Bash        # grants real bash tool-calling loop with error feedback
+required-keys: [HF_TOKEN]  # skill filtered out at startup if key missing; omit if no key needed
 ---
 
 Your skill instructions here. The agent will follow these exactly.
@@ -183,4 +182,4 @@ Your skill instructions here. The agent will follow these exactly.
 { "id": "my-skill", "description": "One-line description shown in the planner." }
 ```
 
-That's it — the planner picks it up automatically on the next run.
+That's it — the planner picks it up automatically on the next run. If `required-keys` lists a key that isn't set in `.env`, the skill is silently excluded from the planner rather than failing mid-run.
