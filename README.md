@@ -8,23 +8,41 @@ An autonomous research agent that turns a topic into a peer-reviewed, compiled P
 
 Built on [PocketFlow](https://github.com/The-Pocket/PocketFlow). Directly inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch): fix the budget, run the loops, let the agent figure out the rest.
 
+---
+
 ## How it works
 
 ```mermaid
-flowchart LR
-    I[Initializer] -->|research| RE[ResearchExecutor]
-    RE -->|research| RE
-    RE -->|write| WE[WritingExecutor]
-    WE -->|write| WE
+flowchart TD
+    I([Initializer]) --> RE
+
+    subgraph RESEARCH["Research Loop"]
+        RE[ResearchExecutor]
+        RE -->|research| RE
+    end
+
+    subgraph WRITING["Writing Loop"]
+        WE[WritingExecutor]
+        WE -->|write| WE
+    end
+
+    subgraph COMPILE["Compile & Fix"]
+        CT[CompileTeX]
+        FT[FixTeX]
+        CT -->|fix| FT
+        FT -->|compile| CT
+    end
+
+    RE -->|write| WE
     WE -->|review| RV[ReviewExecutor]
     RV -->|research| RE
     RV -->|write| WE
-    RV -->|compile| CT[CompileTeX]
-    CT -->|fix| FT[FixTeX]
-    FT -->|compile| CT
-    CT -->|done| F[Finisher]
+    RV -->|compile| CT
+    CT -->|done| F([Finisher])
     FT -->|done| F
 ```
+
+### Stage breakdown
 
 | Stage | What happens |
 |---|---|
@@ -32,13 +50,13 @@ flowchart LR
 | **ResearchExecutor** | Autonomous loop: picks one skill per iteration, decomposes it inline (2–5 steps), executes; self-loops until budget threshold; supports *scoped mode* for revision-directed research |
 | **WritingExecutor** | Autonomous loop: picks one section per iteration, writes LaTeX; self-loops until all sections done; supports *scoped mode* for targeted rewrites |
 | **ReviewExecutor** | Assembles the full draft and runs peer-review; dispatches the top major comment directly to research or rewrite; returns `compile` when the draft is accepted |
-| **CompileTeX** | Runs `pdflatex` + `bibtex` to produce a PDF — runs **exactly once**, as the final step |
+| **CompileTeX** | Runs `pdflatex` + `bibtex` to produce a PDF — runs **exactly once** |
 | **FixTeX** | Patches undefined citations or LaTeX errors and recompiles |
 | **Finisher** | Writes `cost_log.json` + `summary.json`, prints total cost |
 
-**Why nano?** The core is intentionally tiny — 4 source files, ~1,100 lines total. Three mandatory stages (Research → Write → Review) with the review node handling revision dispatch directly. The budget is the only knob.
+> **Why nano?** The core is intentionally tiny — 4 source files, ~1,100 lines total. Three mandatory stages (Research → Write → Review) with the review node handling revision dispatch directly. The budget is the only knob.
 
-Each skill call costs ~$0.005; the final report ~$0.01. The agent runs until the budget is spent, reviews the draft, and compiles the PDF.
+---
 
 ## Quickstart
 
@@ -75,6 +93,8 @@ outputs/
     └── summary.json       # final run summary
 ```
 
+---
+
 ## CLI reference
 
 ```
@@ -90,21 +110,23 @@ Options:
   --list-skills         Print available skills and exit
 ```
 
-**Budget tiers**
+### Budget tiers
 
 Report type is inferred from budget at startup. Actual cost depends on model pricing, skill mix, and how many review/revision cycles occur.
 
 | Budget | Report type | Sections | Notes |
 |---|---|---|---|
 | < $0.10 | Quick Summary | 4 | 1–2 skill calls; minimal citations |
-| $0.10 – $0.50 | Literature Review | 5 | several skill calls; may exhaust budget before all sections written |
-| $0.50 – $2.00 | Research Report | 7 | typical run with methods + results |
-| $2.00 – $5.00 | Full Paper | 8 | multiple review/revision cycles possible |
-| $5.00+ | Full Paper | 8 | extended research depth; more skills, more citations |
+| $0.10 – $0.50 | Literature Review | 5 | Several skill calls; may exhaust budget before all sections written |
+| $0.50 – $2.00 | Research Report | 7 | Typical run with methods + results |
+| $2.00 – $5.00 | Full Paper | 8 | Multiple review/revision cycles possible |
+| $5.00+ | Full Paper | 8 | Extended research depth; more skills, more citations |
+
+---
 
 ## Skills
 
-Each skill is a folder under `skills/` with a `SKILL.md` that the agent reads at runtime (lazy-loaded — only the active skill is ever in context).
+Each skill is a folder under `skills/` with a `SKILL.md` that the agent reads at runtime (lazy-loaded — only the active skill is ever in context). Skills with `allowed-tools: Bash` get a real tool-calling loop with bash execution and error feedback.
 
 | Skill | What it produces |
 |---|---|
@@ -129,39 +151,7 @@ Each skill is a folder under `skills/` with a `SKILL.md` that the agent reads at
 | `research-grants` | Grant proposal sections |
 | `scholar-evaluation` | Researcher profile and impact assessment |
 
-Skills that require code execution declare `allowed-tools: Bash` in their frontmatter.
-
-## Environment variables
-
-| Variable | Required | Used for |
-|---|---|---|
-| `OPENROUTER_API_KEY` | **Yes** | Core LLM inference (all nodes) |
-| `HF_TOKEN` | Skill-gated | `tooluniverse` (Hugging Face discovery) |
-| `GITHUB_TOKEN` | Skill-gated | `github-mining` (code/repo search) |
-| `OPENAI_API_KEY` | Skill-gated | `paper-2-web` (HTML/video/poster export) |
-
-Only `OPENROUTER_API_KEY` is strictly required. Skills whose required key is missing are automatically filtered out at startup — the agent runs with whatever skills are available. Copy `.env.example` to `.env` and set the keys you have.
-
-## Project layout
-
-```
-nanoscientist/
-├── main.py              # CLI entry point
-├── src/
-│   ├── flow.py          # PocketFlow wiring (7 nodes)
-│   ├── nodes.py         # 7 agent nodes + module-level helpers
-│   └── utils.py         # LLM client, cost tracking, BibTeX utils
-├── skills/              # 20 modular research skills
-│   ├── skills.json      # skill index (id + description)
-│   └── <skill-name>/
-│       └── SKILL.md     # instructions + optional YAML frontmatter
-├── docs/
-│   └── PAPER_QUALITY_STANDARD.md
-├── outputs/             # generated reports (git-ignored)
-└── .env                 # API keys (git-ignored)
-```
-
-## Adding a skill
+### Adding a skill
 
 1. Create `skills/my-skill/SKILL.md` with a YAML frontmatter block:
 
@@ -183,3 +173,48 @@ Your skill instructions here. The agent will follow these exactly.
 ```
 
 That's it — the planner picks it up automatically on the next run. If `required-keys` lists a key that isn't set in `.env`, the skill is silently excluded from the planner rather than failing mid-run.
+
+---
+
+## Environment variables
+
+| Variable | Required | Used for |
+|---|---|---|
+| `OPENROUTER_API_KEY` | **Required** | Core LLM inference (all nodes) |
+| `HF_TOKEN` | Skill-gated | `tooluniverse` (Hugging Face discovery) |
+| `GITHUB_TOKEN` | Skill-gated | `github-mining` (code/repo search) |
+| `OPENAI_API_KEY` | Skill-gated | `paper-2-web` (HTML/video/poster export) |
+
+Only `OPENROUTER_API_KEY` is strictly required. Skills whose required key is missing are automatically filtered out at startup — the agent runs with whatever skills are available. Copy `.env.example` to `.env` and set the keys you have.
+
+Optional tuning variables (set in `.env` or shell):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEL_NAME` | — | Override the inference model |
+| `INFERENCE_BASE_URL` | — | Point to a custom OpenAI-compatible endpoint |
+| `INPUT_TOKEN_COST_PER_MILLION` | — | Used to estimate LLM calls remaining |
+| `OUTPUT_TOKEN_COST_PER_MILLION` | — | Used to estimate LLM calls remaining |
+| `LOOKBACK` | `3` | History steps visible to each node |
+| `MAX_REVIEW_ROUNDS` | `1` | How many review/revision cycles to allow |
+
+---
+
+## Project layout
+
+```
+nanoscientist/
+├── main.py              # CLI entry point
+├── src/
+│   ├── flow.py          # PocketFlow wiring (7 nodes)
+│   ├── nodes.py         # 7 agent nodes + module-level helpers
+│   └── utils.py         # LLM client, cost tracking, BibTeX utils
+├── skills/              # 20 modular research skills
+│   ├── skills.json      # skill index (id + description)
+│   └── <skill-name>/
+│       └── SKILL.md     # instructions + optional YAML frontmatter
+├── docs/
+│   └── PAPER_QUALITY_STANDARD.md
+├── outputs/             # generated reports (git-ignored)
+└── .env                 # API keys (git-ignored)
+```
