@@ -1,6 +1,6 @@
 # Nanoscientist
 
-> **Nano. Lean. Two loops, one budget, one paper.**
+> **v0.0.4** · Nano. Lean. Two loops, one budget, one paper.
 
 <img width="1200" height="800" alt="Nanoscientist" src="https://github.com/user-attachments/assets/fadce36b-34c2-4649-97f0-16c257b55d3d" />
 
