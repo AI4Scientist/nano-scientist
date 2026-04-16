@@ -1,11 +1,13 @@
 """PocketFlow nodes for the Autonomous Scientist agent.
 
 Full pipeline:
-  Initializer → ResearchExecutor (loop) → WritingExecutor (loop)
-              → ReviewExecutor → [research / write / compile]
+  Initializer → PlanInitialExecutor → PlanDrivenExecutor (loop)
+              → ReviewExecutor → [execute / compile]
               → CompileTeX ↔ FixTeX → Finisher
 
-ReviewExecutor dispatches revisions directly into the research/writing loops.
+PlanInitialExecutor drafts a typed todo list (research + write steps).
+PlanDrivenExecutor executes each step in order, optionally revising the plan.
+ReviewExecutor appends new steps to the plan tail for revision.
 LaTeX compilation happens exactly once, as the final PDF generation step.
 """
 
@@ -21,9 +23,10 @@ from pocketflow import Node
 from .utils import (
     call_llm,
     call_llm_with_tools,
-    format_skill_index,
-    format_available_keys,
     load_skill_content,
+    load_mcp_config,
+    filter_mcp_servers,
+    format_mcp_context,
     parse_yaml_response,
     extract_bibtex,
     dedup_bibtex,
@@ -143,10 +146,11 @@ def _plan_context(shared: dict) -> str:
     lookback_n = int(os.environ.get("LOOKBACK", "3"))
 
     done   = [t for t in plan if t.get("status") == "done"]
+    failed = [t for t in plan if t.get("status") == "failed"]
     active = [t for t in plan if t.get("status") == "in_progress"]
     pending = [t for t in plan if t.get("status") == "pending"]
 
-    lines = [f"## Research Plan ({len(done)}/{len(plan)} steps complete)"]
+    lines = [f"## Research Plan ({len(done)}/{len(plan)} steps complete, {len(failed)} failed)"]
 
     # Lookback: last min(lookback_n, len(done)) completed steps
     shown_done = done[-lookback_n:] if done else []
@@ -156,6 +160,12 @@ def _plan_context(shared: dict) -> str:
             lines.append(f"  [x] {t['id']}. {t['task']}")
         if len(done) > lookback_n:
             lines.append(f"  ... ({len(done) - lookback_n} earlier steps)")
+
+    # Failed steps — always show so writer knows data may be missing
+    if failed:
+        lines.append("### Failed (incomplete — tool rounds exhausted; data may be partial)")
+        for t in failed:
+            lines.append(f"  [!] {t['id']}. {t['task']}")
 
     # Active step
     for t in active:
@@ -168,6 +178,76 @@ def _plan_context(shared: dict) -> str:
             lines.append(f"  [ ] {t['id']}. {t['task']}")
 
     return "\n".join(lines)
+
+
+def _extend_bibtex(shared: dict, new_entries: list[str]):
+    """Add BibTeX entries to shared store, skipping keys already present."""
+    existing_keys = set()
+    for e in shared.get("bibtex_entries", []):
+        m = re.match(r"@\w+\{([^,]+),", e)
+        if m:
+            existing_keys.add(m.group(1).strip())
+    for entry in new_entries:
+        m = re.match(r"@\w+\{([^,]+),", entry)
+        if m and m.group(1).strip() not in existing_keys:
+            shared.setdefault("bibtex_entries", []).append(entry)
+            existing_keys.add(m.group(1).strip())
+
+
+def _data_summary(shared: dict) -> str:
+    """Scan output data/ dir for JSON/CSV files and extract key numeric statistics.
+
+    Returns a compact text block injected into writing prompts so the LLM uses
+    real numbers instead of hallucinating them.
+    """
+    out_dir = Path(shared.get("output_path", ""))
+    data_dir = out_dir / "data"
+    if not data_dir.is_dir():
+        return ""
+
+    lines = ["## Data files (USE THESE EXACT NUMBERS in your section — do not invent statistics)"]
+    found_any = False
+
+    for f in sorted(data_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() == ".json":
+            try:
+                raw = f.read_text(encoding="utf-8", errors="replace")
+                data = json.loads(raw)
+                # Flatten top-level scalar fields as key=value pairs
+                stats = []
+                def _flatten(obj, prefix=""):
+                    if isinstance(obj, dict):
+                        for k, v in list(obj.items())[:30]:
+                            _flatten(v, f"{prefix}{k}.")
+                    elif isinstance(obj, list):
+                        stats.append(f"{prefix}count={len(obj)}")
+                        # Sample first element keys
+                        if obj and isinstance(obj[0], dict):
+                            stats.append(f"{prefix}fields={list(obj[0].keys())[:8]}")
+                    elif isinstance(obj, (int, float, str, bool)) and obj is not None:
+                        val = str(obj)[:120]
+                        stats.append(f"{prefix[:-1]}={val}")
+                _flatten(data)
+                if stats:
+                    lines.append(f"### {f.name}")
+                    lines.extend(f"  {s}" for s in stats[:40])
+                    found_any = True
+            except Exception:
+                pass
+        elif f.suffix.lower() == ".csv":
+            try:
+                raw = f.read_text(encoding="utf-8", errors="replace")
+                rows = [r for r in raw.splitlines() if r.strip()]
+                if rows:
+                    lines.append(f"### {f.name}")
+                    lines.append(f"  rows={len(rows) - 1}  columns={rows[0][:200]}")
+                    found_any = True
+            except Exception:
+                pass
+
+    return "\n".join(lines) if found_any else ""
 
 
 def _run_code_blocks(text: str, skill_name: str, task_dir: Path, shared: dict) -> list[str]:
@@ -221,7 +301,7 @@ def _save_artifact(text: str, skill_name: str, step_label: str,
         main += "\n\n## Code Output\n" + "\n".join(code_outputs)
 
     shared["artifacts"][skill_name] = (shared["artifacts"].get(skill_name, "") + "\n\n" + main).strip()
-    shared["bibtex_entries"].extend(entries)
+    _extend_bibtex(shared, entries)
 
     out_dir = Path(shared["output_path"])
     (out_dir / "artifacts").mkdir(exist_ok=True)
@@ -248,6 +328,14 @@ def _run_skill(skill_name: str, shared: dict):
     skill_content, meta = load_skill_content(shared["skills_dir"], skill_name)
     can_execute = "Bash" in meta.get("allowed-tools", [])
     out_dir = Path(shared["output_path"])
+
+    # Load MCP context once per skill (injected into step prompts when Bash is available)
+    mcp_context = ""
+    if can_execute:
+        api_keys = shared.get("api_keys", {})
+        raw_servers = load_mcp_config()
+        available_servers = filter_mcp_servers(raw_servers, api_keys)
+        mcp_context = format_mcp_context(available_servers)
 
     # Decompose
     text, usage = call_llm(
@@ -284,14 +372,22 @@ Return YAML list only:
         instruction = s.get("instruction", "Execute the full skill.")
         needs_code = bool(s.get("needs_code")) and can_execute
 
+        abs_out = str(Path(shared["output_path"]).resolve())
+        mcp_block = f"\n\n{mcp_context}" if mcp_context else ""
         step_prompt = f"""Execute this single research step. Be focused and concise.
 
 ## Topic: {shared["topic"]}
 ## Step: {instruction}
 ## Recent context: {_recent_history(shared, 5)}
-## Working directory: {shared["output_path"]}
+## Working directory (ABSOLUTE): {abs_out}{mcp_block}
 
-Save data → `data/`, figures → `figures/` (relative paths). No plt.show().
+CRITICAL working-directory rules:
+- ALL bash commands run inside {abs_out} — this is enforced by the shell.
+- Save data files to `{abs_out}/data/` — use ABSOLUTE paths in every command.
+- Save figures to `{abs_out}/figures/` — use ABSOLUTE paths in every command.
+- NEVER use bare `cd` to change to a different base directory. Use absolute paths instead.
+- No plt.show(). Use plt.savefig("{abs_out}/figures/<name>.png") explicitly.
+
 After completing the step, summarise findings and append any citations:
 
 %%BEGIN BIBTEX%%
@@ -303,9 +399,14 @@ After completing the step, summarise findings and append any citations:
             step_text, step_usage = call_llm_with_tools(
                 step_prompt,
                 budget_remaining=shared.get("budget_remaining", 0),
-                cwd=shared["output_path"],
+                cwd=abs_out,
             )
             code_outputs = []  # execution happened inside the tool loop
+            if step_usage.get("tool_rounds_exhausted"):
+                shared.setdefault("exhausted_steps", []).append(
+                    {"skill": skill_name, "step": s.get("step", 1)})
+                print(f"[ResearchExecutor] WARNING: {skill_name}/step{s.get('step',1)} "
+                      f"hit max tool rounds — output may be incomplete.")
         else:
             step_text, step_usage = call_llm(
                 step_prompt,
@@ -326,10 +427,10 @@ def _write_section(section: str, shared: dict):
     cite_keys = [m.group(1).strip()
                  for e in shared.get("bibtex_entries", [])
                  for m in [re.match(r"@\w+\{([^,]+),", e)] if m]
-    artifact_text = "\n\n".join(f"### {k}\n{v[:1200]}"
+    artifact_text = "\n\n".join(f"### {k}\n{v[:2500]}"
                                 for k, v in shared.get("artifacts", {}).items())
     prior_text = ("\n\n## Prior sections\n" +
-                  "\n\n".join(f"### {s}\n{b[:400]}"
+                  "\n\n".join(f"### {s}\n{b[:800]}"
                               for s, b in shared.get("section_bodies", {}).items())
                   if shared.get("section_bodies") else "")
     figures_dir = out_dir / "figures"
@@ -337,23 +438,23 @@ def _write_section(section: str, shared: dict):
                      if f.suffix.lower() in (".png", ".pdf", ".jpg", ".jpeg")]
                     if figures_dir.is_dir() else [])
     figures_block = ""
-    if figure_files and section in ("results", "discussion", "methods"):
-        figures_block = ("\n\n## Figures\n" + "\n".join(f"- {f}" for f in figure_files) +
-                         r"\n Pattern: \begin{figure}[htbp]\centering"
-                         r"\includegraphics[width=0.8\textwidth]{figures/<name>}"
-                         r"\caption{...}\label{fig:<l>}\end{figure}")
-    data_dir = out_dir / "data"
-    data_block = ""
-    if data_dir.is_dir() and section in ("results", "methods"):
-        previews = []
-        for f in sorted(data_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in (".csv", ".json", ".tsv"):
-                try:
-                    previews.append(f"### {f.name}\n```\n{f.read_text(encoding='utf-8', errors='replace')[:500]}\n```")
-                except Exception:
-                    pass
-        if previews:
-            data_block = "\n\n## Data\n" + "\n".join(previews)
+    if figure_files:
+        figures_block = (
+            "\n\n## Available figures (include at least one relevant figure in this section)\n"
+            + "\n".join(f"- {f}" for f in figure_files)
+            + "\n\nUse this LaTeX pattern for each figure you include:\n"
+            r"""```latex
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/<filename>}
+\caption{<descriptive caption>}
+\label{fig:<label>}
+\end{figure}
+```"""
+        )
+    data_block = _data_summary(shared)
+    if data_block:
+        data_block = "\n\n" + data_block
 
     text, usage = call_llm(
         f"""Write the **{section}** section of a {shared.get("report_type","Literature Review").lower()} as compilable LaTeX.
@@ -383,26 +484,42 @@ def _write_section(section: str, shared: dict):
 
     sec_m = re.search(r"%%BEGIN SECTION%%(.*?)%%END SECTION%%", text, re.DOTALL)
     body = sec_m.group(1).strip() if sec_m else text.strip()
+    # Always strip BibTeX marker blocks from body — they must never appear in LaTeX
+    body = re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", body, flags=re.DOTALL).strip()
     bib_m = re.search(r"%%BEGIN BIBTEX%%(.*?)%%END BIBTEX%%", text, re.DOTALL)
     if bib_m:
         new_entries = [e.strip() for e in re.findall(r"(@\w+\{[^@]+)", bib_m.group(1), re.DOTALL) if e.strip()]
-        shared.setdefault("bibtex_entries", []).extend(new_entries)
+        _extend_bibtex(shared, new_entries)
 
     shared.setdefault("section_bodies", {})[section] = body
     if section not in shared.get("sections_written", []):
         shared.setdefault("sections_written", []).append(section)
-    print(f"[WritingExecutor] '{section}' written ({len(body)} chars, ${usage['cost']:.4f})")
+    print(f"[PlanDrivenExecutor] '{section}' written ({len(body)} chars, ${usage['cost']:.4f})")
 
 
 def _assemble_tex(shared: dict):
     """Assemble report.tex + references.bib from written sections."""
     order = _section_order(shared)
-    body = "\n\n".join(shared["section_bodies"].get(s, "")
-                       for s in order if s in shared["section_bodies"] and s != "abstract")
+    # Defensive: strip any BibTeX marker blocks that leaked into section bodies
+    cleaned_bodies = {
+        s: re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", b, flags=re.DOTALL).strip()
+        for s, b in shared.get("section_bodies", {}).items()
+    }
+    body = "\n\n".join(cleaned_bodies.get(s, "")
+                       for s in order if s in cleaned_bodies and s != "abstract")
     abstract = re.sub(r"\\section\{[Aa]bstract\}\s*", "",
-                      shared["section_bodies"].get("abstract", "Abstract not available.")).strip()
+                      cleaned_bodies.get("abstract", "Abstract not available.")).strip()
+    # Title-case the topic for the LaTeX title (avoids all-lowercase titles)
+    raw_topic = shared.get("topic", "Research Report")
+    title = " ".join(
+        w if w.lower() in {"a", "an", "the", "and", "but", "or", "for",
+                           "nor", "on", "at", "to", "by", "in", "of", "up",
+                           "as", "is", "it", "vs", "via"} and i > 0
+        else w.capitalize()
+        for i, w in enumerate(raw_topic.split())
+    )
     tex = (LATEX_SKELETON
-           .replace("%% TITLE %%", shared.get("topic", "Research Report"))
+           .replace("%% TITLE %%", title)
            .replace("%% ABSTRACT %%", abstract)
            .replace("%% BODY %%", body))
     bib = dedup_bibtex(shared.get("bibtex_entries", []))
@@ -411,7 +528,7 @@ def _assemble_tex(shared: dict):
     (out_dir / "references.bib").write_text(bib, encoding="utf-8")
     shared["tex_content"] = tex
     shared["bib_content"] = bib
-    print(f"[WritingExecutor] report.tex assembled ({len(tex)} chars)")
+    print(f"[PlanDrivenExecutor] report.tex assembled ({len(tex)} chars)")
 
 
 # ===================================================================
@@ -439,7 +556,6 @@ class Initializer(Node):
             "sections_written": [], "section_bodies": {},
             "failed_code": {}, "fix_attempts": 0,
             "cost_log": [], "review_rounds": 0,
-            "revision_scope": {},
         })
 
         print(f"[Initializer] {out_dir} | {exec_res} | ${shared['budget_dollars']:.2f}")
@@ -447,9 +563,9 @@ class Initializer(Node):
 
 
 # ===================================================================
-# 2. PlanExecutor  — drafts structured todo list (feedforward control)
+# 2. PlanInitialExecutor  — drafts structured todo list (feedforward control)
 # ===================================================================
-class PlanExecutor(Node):
+class PlanInitialExecutor(Node):
     def prep(self, shared):
         return {
             "topic": shared["topic"],
@@ -464,6 +580,8 @@ class PlanExecutor(Node):
 
     def exec(self, prep_res):
         skills_list = "\n".join(f"- {k}: {v}" for k, v in sorted(prep_res["skill_index"].items()))
+        required_sections = SECTION_ORDER.get(prep_res["report_type"],
+                                              SECTION_ORDER["Literature Review"])
         text, usage = call_llm(
             f"""You are a research planning agent. Draft a concrete, ordered research plan.
 
@@ -476,17 +594,24 @@ class PlanExecutor(Node):
 ## Available skills
 {skills_list}
 
-Create a focused research plan: 3-7 steps, each using one skill.
-Prioritise breadth first (survey → analysis → synthesis).
-Fit within budget — fewer steps for small budgets.
+## Required sections (must all be written)
+{", ".join(required_sections)}
+
+Create a focused end-to-end plan: research steps first, then one write step per section.
+Prioritise breadth first (survey → analysis → synthesis → write).
+Fit within budget — fewer research steps for small budgets.
 
 Return YAML list only:
 ```yaml
 - id: 1
+  type: research
   task: <one-line description of what this step produces>
   skill: <skill-name>
 - id: 2
-  ...
+  type: write
+  task: Write the <section> section
+  skill: scientific-writing
+  section: <section-name>
 ```""",
             budget_remaining=prep_res["budget"],
         )
@@ -498,237 +623,205 @@ Return YAML list only:
 
         parsed = parse_yaml_response(text)
         if isinstance(parsed, list) and parsed:
-            plan = [
-                {"id": item.get("id", i + 1),
-                 "task": item.get("task", ""),
-                 "skill": item.get("skill", ""),
-                 "status": "pending"}
-                for i, item in enumerate(parsed)
-                if isinstance(item, dict) and item.get("task")
-            ]
-        else:
-            # Fallback: empty plan — ResearchExecutor will free-choose skills
             plan = []
+            for i, item in enumerate(parsed):
+                if not isinstance(item, dict) or not item.get("task"):
+                    continue
+                step = {
+                    "id": item.get("id", i + 1),
+                    "type": item.get("type", "research"),
+                    "task": item.get("task", ""),
+                    "skill": item.get("skill", ""),
+                    "status": "pending",
+                }
+                if item.get("section"):
+                    step["section"] = item["section"]
+                plan.append(step)
+        else:
+            print(f"[PlanInitialExecutor] Could not parse plan — raw response:\n{text[:500]}")
+            # Fallback: build a minimal plan from required sections using available skills
+            plan = self._fallback_plan(shared, prep_res)
 
         shared["plan"] = plan
         if plan:
-            print(f"[PlanExecutor] {len(plan)}-step plan drafted:")
+            print(f"[PlanInitialExecutor] {len(plan)}-step plan drafted:")
             for t in plan:
-                print(f"  {t['id']}. [{t['skill']}] {t['task']}")
-        else:
-            print("[PlanExecutor] Could not parse plan — ResearchExecutor will choose freely.")
-        return "research"
+                label = f"[{t['type']}:{t['skill']}]"
+                if t.get("section"):
+                    label += f"[{t['section']}]"
+                print(f"  {t['id']}. {label} {t['task']}")
+        return "execute"
+
+    def _fallback_plan(self, shared: dict, prep_res: dict) -> list:
+        """Build a minimal valid plan when LLM output cannot be parsed."""
+        skill_index = prep_res["skill_index"]
+        required_sections = SECTION_ORDER.get(prep_res["report_type"],
+                                              SECTION_ORDER["Literature Review"])
+        # Pick first available research skill for a survey step
+        research_skill = next(iter(skill_index), "")
+        plan = []
+        step_id = 1
+        if research_skill:
+            plan.append({
+                "id": step_id,
+                "type": "research",
+                "task": f"Survey literature on: {prep_res['topic']}",
+                "skill": research_skill,
+                "status": "pending",
+            })
+            step_id += 1
+        for section in required_sections:
+            plan.append({
+                "id": step_id,
+                "type": "write",
+                "task": f"Write the {section} section",
+                "skill": "",
+                "section": section,
+                "status": "pending",
+            })
+            step_id += 1
+        print(f"[PlanInitialExecutor] Using fallback plan ({len(plan)} steps).")
+        return plan
 
 
 # ===================================================================
-# 3. ResearchExecutor  — research loop
+# 3. PlanDrivenExecutor  — executes plan steps in order, revises plan
 # ===================================================================
-class ResearchExecutor(Node):
-    @property
-    def LOOKBACK(self):
-        return int(os.environ.get("LOOKBACK", "3"))
-
+class PlanDrivenExecutor(Node):
     def prep(self, shared):
-        budget = shared.get("budget_remaining", 0)
-        cost_log = shared.get("cost_log", [])
-        scope = shared.get("revision_scope", {})
         plan = shared.get("plan", [])
-
-        # Advance plan: mark first pending item as in_progress if nothing is active
-        active = [t for t in plan if t.get("status") == "in_progress"]
         pending = [t for t in plan if t.get("status") == "pending"]
-        if not active and pending:
-            pending[0]["status"] = "in_progress"
-
-        # In scoped (revision) mode, suggest the revision skill from scope
-        scoped_skill = scope.get("target_skill", "") if scope.get("mode") == "research" else ""
-
-        # Determine suggested skill from plan (active item)
-        active_now = [t for t in plan if t.get("status") == "in_progress"]
-        plan_skill = active_now[0].get("skill", "") if active_now else ""
-
+        next_step = pending[0] if pending else None
+        if next_step:
+            next_step["status"] = "in_progress"
         return {
-            "topic": shared["topic"],
-            "budget": budget,
-            "cost_log": cost_log,
-            "calls_left": estimate_calls_remaining(budget, cost_log=cost_log),
-            "skills": format_skill_index(shared["skill_index"]),
-            "api_keys": format_available_keys(shared.get("api_keys", {})),
-            "artifact_index": _artifact_index(shared),
-            "history_text": _recent_history(shared, self.LOOKBACK),
+            "step": next_step,
+            "budget": shared.get("budget_remaining", 0),
             "plan_context": _plan_context(shared),
-            "plan_skill": plan_skill,
-            "skills_dir": shared["skills_dir"],
-            "scoped_skill": scoped_skill,
+            "artifact_index": _artifact_index(shared),
         }
 
     def exec(self, prep_res):
+        # No-op: actual execution happens in post (needs shared)
+        return prep_res
+
+    def post(self, shared, prep_res, exec_res):
+        step = prep_res["step"]
         budget = prep_res["budget"]
-        if budget < BUDGET_RESERVE:
-            return {"action": "done", "reason": "budget at reserve"}, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
 
-        # Scoped mode: directed single skill, no LLM decision needed
-        if prep_res["scoped_skill"]:
-            return {"action": "execute", "skill": prep_res["scoped_skill"],
-                    "reason": "revision-directed"}, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
+        # Plan exhausted or budget too low → review
+        if not step or budget < WRITE_RESERVE:
+            return "review"
 
-        plan_hint = (f"\n## Plan suggestion\nThe plan recommends: `{prep_res['plan_skill']}` next.\n"
-                     f"Follow it unless the artifacts clearly show a better gap to fill.\n"
-                     if prep_res["plan_skill"] else "")
+        skill = step.get("skill", "")
+        step_type = step.get("type", "research")
+
+        if step_type == "write":
+            section = step.get("section", "")
+            if not section:
+                # Infer section from task text as fallback
+                task = step.get("task", "").lower()
+                for s in _section_order(shared):
+                    if s in task:
+                        section = s
+                        break
+            if section:
+                print(f"[PlanDrivenExecutor] write:{section}")
+                _write_section(section, shared)
+                step["status"] = "done"
+            else:
+                print(f"[PlanDrivenExecutor] write step missing section, skipping.")
+                step["status"] = "failed"
+        else:
+            # research step
+            if skill and skill in shared.get("skill_index", {}):
+                print(f"[PlanDrivenExecutor] research:{skill} — {step.get('task','')}")
+                exhausted_before = len(shared.get("exhausted_steps", []))
+                _run_skill(skill, shared)
+                exhausted_after = len(shared.get("exhausted_steps", []))
+                step["status"] = "failed" if exhausted_after > exhausted_before else "done"
+            else:
+                print(f"[PlanDrivenExecutor] unknown skill '{skill}', skipping.")
+                step["status"] = "failed"
+
+        # Optionally revise remaining plan based on new findings (one cheap LLM call)
+        self._maybe_revise_plan(shared, step)
+
+        # Check if more pending steps remain
+        pending = [t for t in shared.get("plan", []) if t.get("status") == "pending"]
+        if pending and shared.get("budget_remaining", 0) >= WRITE_RESERVE:
+            return "execute"
+        return "review"
+
+    def _maybe_revise_plan(self, shared: dict, completed_step: dict):
+        """Ask LLM if remaining plan needs adjustment based on new findings."""
+        pending = [t for t in shared.get("plan", []) if t.get("status") == "pending"]
+        if not pending or shared.get("budget_remaining", 0) < BUDGET_RESERVE * 2:
+            return  # skip if too few pending steps or budget tight
 
         text, usage = call_llm(
-            f"""You are an autonomous research agent. Choose the single best next action.
+            f"""You are a research plan monitor. A step just completed:
+Step: {completed_step.get('task','')}
+Skill: {completed_step.get('skill','')}
+Status: {completed_step.get('status','')}
 
-## Topic
-{prep_res["topic"]}
+New artifacts:
+{_artifact_index(shared)}
 
-## Budget: ${prep_res["budget"]:.4f} (~{prep_res["calls_left"]} calls left)
-Reserve ${BUDGET_RESERVE:.2f} for writing + review.
-{plan_hint}
-{prep_res["plan_context"]}
+Remaining plan steps:
+{chr(10).join(f"  {t['id']}. [{t.get('type','research')}:{t.get('skill','')}] {t['task']}" for t in pending)}
 
-## Available Skills
-{prep_res["skills"]}
+Should the remaining plan be revised? Only revise if a completed step revealed a critical gap
+or made a remaining step redundant. Minor adjustments are not worth the cost.
 
-## API Keys
-{prep_res["api_keys"]}
-
-## Artifacts so far
-{prep_res["artifact_index"]}
-
-## Recent history (last {self.LOOKBACK})
-{prep_res["history_text"]}
-
-Return YAML — exactly one of:
+Return YAML:
 ```yaml
-action: execute
-skill: <skill-name>
-reason: <one line>
+revise: false
 ```
 or
 ```yaml
-action: done
-reason: <why research is complete>
-```
-Rules:
-- Choose `done` (early stop) if research quality is already sufficient: key concepts covered,
-  enough citations gathered, no obvious gaps remaining — even if budget is not exhausted.
-- Choose `done` when budget nears reserve (${BUDGET_RESERVE:.2f} remaining).
-- Otherwise choose `execute` with the skill that fills the biggest remaining gap.
-Only choose skills whose required API keys are available.""",
-            budget_remaining=budget)
-        parsed = parse_yaml_response(text)
-        return (parsed if isinstance(parsed, dict) else {"action": "done"}), usage
-
-    def post(self, shared, prep_res, exec_res):
-        decision, usage = exec_res
-        track_cost(shared, "research:decide", usage)
-        scope = shared.get("revision_scope", {})
-
-        if decision.get("action") == "execute":
-            skill = decision.get("skill", "")
-            if skill and skill in shared.get("skill_index", {}):
-                print(f"[ResearchExecutor] → {skill}: {decision.get('reason','')}")
-                _run_skill(skill, shared)
-                # Mark matching plan item done
-                for t in shared.get("plan", []):
-                    if t.get("status") == "in_progress" and t.get("skill") == skill:
-                        t["status"] = "done"
-                        break
-            else:
-                print(f"[ResearchExecutor] Unknown skill '{skill}', ending research.")
-
-        # After scoped execution: clear scope, go to write
-        if scope.get("mode") == "research":
-            shared["revision_scope"] = {}
-            return "write"
-
-        if decision.get("action") == "done" or shared.get("budget_remaining", 0) < BUDGET_RESERVE:
-            print(f"[ResearchExecutor] Research complete: {decision.get('reason','')}")
-            return "write"
-        return "research"
-
-
-# ===================================================================
-# 3. WritingExecutor  — writing loop
-# ===================================================================
-class WritingExecutor(Node):
-    def prep(self, shared):
-        budget = shared.get("budget_remaining", 0)
-        cost_log = shared.get("cost_log", [])
-        required = _required_sections(shared)
-        remaining = [s for s in required if s not in shared.get("sections_written", [])]
-        scope = shared.get("revision_scope", {})
-        return {
-            "topic": shared["topic"],
-            "budget": budget,
-            "cost_log": cost_log,
-            "calls_left": estimate_calls_remaining(budget, cost_log=cost_log),
-            "report_type": shared.get("report_type", "Literature Review"),
-            "required": required,
-            "remaining": remaining,
-            "artifact_index": _artifact_index(shared),
-            "sections_written": shared.get("sections_written", []),
-            "scoped_section": scope.get("target_section", "") if scope.get("mode") == "write" else "",
-        }
-
-    def exec(self, prep_res):
-        budget = prep_res["budget"]
-        remaining = prep_res["remaining"]
-
-        if not remaining or budget < WRITE_RESERVE:
-            return {"action": "done"}, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
-
-        # Scoped mode: rewrite one specific section
-        if prep_res["scoped_section"]:
-            return {"action": "write", "section": prep_res["scoped_section"]}, \
-                   {"input_tokens": 0, "output_tokens": 0, "cost": 0}
-
-        text, usage = call_llm(
-            f"""Writing a {prep_res["report_type"].lower()} on: {prep_res["topic"]}
-
-Sections needed:  {", ".join(prep_res["required"])}
-Already written:  {", ".join(prep_res["sections_written"]) or "none"}
-Remaining:        {", ".join(remaining)}
-
-Artifacts:
-{prep_res["artifact_index"]}
-
-Budget: ${budget:.4f} (~{prep_res["calls_left"]} calls left)
-
-Which section next? Return YAML:
-```yaml
-action: write
-section: <section-name>
-```
-or if complete:
-```yaml
-action: done
+revise: true
+changes:
+  - id: <existing-id>
+    action: remove        # remove a now-redundant step
+  - id: <new-id>
+    action: insert
+    after: <existing-id>  # insert after this step
+    type: research
+    task: <one-line description>
+    skill: <skill-name>
 ```""",
-            budget_remaining=budget)
+            budget_remaining=shared.get("budget_remaining", 0),
+        )
+        track_cost(shared, "plan:revise", usage)
+
         parsed = parse_yaml_response(text)
-        return (parsed if isinstance(parsed, dict) else {"action": "write", "section": remaining[0]}), usage
+        if not isinstance(parsed, dict) or not parsed.get("revise"):
+            return
 
-    def post(self, shared, prep_res, exec_res):
-        decision, usage = exec_res
-        track_cost(shared, "writing:decide", usage)
-        scope = shared.get("revision_scope", {})
-
-        if decision.get("action") == "write":
-            section = decision.get("section") or prep_res["remaining"][0]
-            _write_section(section, shared)
-
-        # After scoped execution: clear scope, go to review
-        if scope.get("mode") == "write":
-            shared["revision_scope"] = {}
-            return "review"
-
-        # Check if all required sections done
-        remaining_now = [s for s in prep_res["required"]
-                         if s not in shared.get("sections_written", [])]
-        if not remaining_now or shared.get("budget_remaining", 0) < WRITE_RESERVE:
-            return "review"
-        return "write"
+        plan = shared.get("plan", [])
+        changes = parsed.get("changes", [])
+        for change in changes:
+            action = change.get("action")
+            if action == "remove":
+                cid = change.get("id")
+                plan[:] = [t for t in plan if t.get("id") != cid or t.get("status") != "pending"]
+                print(f"[PlanDrivenExecutor] plan: removed step {cid}")
+            elif action == "insert":
+                after_id = change.get("after")
+                new_step = {
+                    "id": change.get("id", max((t["id"] for t in plan), default=0) + 1),
+                    "type": change.get("type", "research"),
+                    "task": change.get("task", ""),
+                    "skill": change.get("skill", ""),
+                    "status": "pending",
+                }
+                if change.get("section"):
+                    new_step["section"] = change["section"]
+                idx = next((i for i, t in enumerate(plan) if t.get("id") == after_id), len(plan) - 1)
+                plan.insert(idx + 1, new_step)
+                print(f"[PlanDrivenExecutor] plan: inserted step '{new_step['task'][:60]}'")
+        shared["plan"] = plan
 
 
 # ===================================================================
@@ -757,11 +850,11 @@ class ReviewExecutor(Node):
                    {"input_tokens": 0, "output_tokens": 0, "cost": 0}
 
         text, usage = call_llm(
-            f"""You are a rigorous peer reviewer. Review this draft and identify issues.
+            f"""You are a rigorous peer reviewer assessing a draft for top-venue submission.
+Evaluate against NeurIPS/ICML/ICLR/ACL reviewer standards.
 
 ## Topic: {prep_res["topic"]}
 ## Report type: {prep_res["report_type"]}
-## Budget remaining: ${budget:.4f}
 
 ## Draft (LaTeX)
 {prep_res["tex_content"][:6000]}
@@ -769,24 +862,58 @@ class ReviewExecutor(Node):
 ## Artifacts available
 {prep_res["artifact_index"]}
 
-Evaluate: scientific soundness, completeness, evidence quality, section structure, citation coverage.
+## Evaluation dimensions (score each 1-5 mentally, flag if < 3)
+- **Soundness**: Claims well-supported by evidence? Methods technically correct? Assumptions stated?
+- **Significance**: Advances understanding? Others will build on it?
+- **Originality**: New insights, methods, or perspectives? Differentiated from prior work?
+- **Clarity**: Well-organized? Reproducible from description alone?
+
+## Quality checklist — flag any violated item as a major comment
+### Structure
+- Title specific and under 15 words (not all-lowercase)
+- Abstract 150-250 words, self-contained, states problem/approach/findings
+- Introduction ends with 1-3 specific claims
+- Background synthesizes by theme (not chronological list)
+- Every claim backed by citation or evidence
+- Limitations honestly acknowledged
+- Conclusion does not repeat abstract
+
+### Figures & formulas
+- At least one figure or table (architecture, workflow, or results plot)
+- All figures referenced in text with self-contained captions
+- Key technical concepts formalized with equations where appropriate
+
+### Citations
+- Min 5 (quick summary), 10-15 (lit review), 20+ (full paper)
+- Every \\cite{{key}} resolves; every .bib entry is cited
+- At least 30% from last 5 years
+
+### Writing craft
+- Active voice preferred; formal academic tone
+- Narrative follows claim-evidence-commentary pattern
+- No overclaiming or speculation presented as fact
+- Related work organized by theme, positioned against this contribution
+
+## Available skills for research fixes
+{prep_res["artifact_index"]}
 
 Return YAML:
 ```yaml
-action: compile       # if draft is acceptable for submission
+action: compile       # draft meets submission standard
 # or
-action: revise        # if critical issues found
+action: revise        # critical issues found
 comments:
   - id: 1
     severity: major   # major | minor
-    section: <section>
-    issue: <what is wrong>
+    section: <section-name>
+    issue: <specific problem, cite checklist item>
     fix: research     # needs new data/analysis
     # or
-    fix: rewrite      # section rewrite only
-    skill: <skill-name if fix==research>
+    fix: rewrite      # section prose rewrite only
+    skill: <skill-name>   # only when fix==research
 ```
-Be strict but realistic. Only request revision if it materially improves the paper.""",
+Be strict but realistic. Only flag major issues that materially improve the paper.
+Do NOT request revision for cosmetic issues — only for checklist violations or missing substance.""",
             budget_remaining=budget)
         parsed = parse_yaml_response(text)
         if not isinstance(parsed, dict):
@@ -807,30 +934,30 @@ Be strict but realistic. Only request revision if it materially improves the pap
             print(f"[ReviewExecutor] Draft accepted (round {shared['review_rounds']})")
             return "compile"
 
-        # Store all major comments for tracking
-        shared.setdefault("review_comments", []).extend(
-            c for c in major if c.get("id") not in [x.get("id") for x in shared.get("review_comments", [])]
-        )
-
-        # Dispatch the top pending comment
-        comment = pending[0]
-        comment_id = comment.get("id")
-        shared.setdefault("addressed_comments", []).append(comment_id)
-        fix = comment.get("fix", "rewrite")
-        section = comment.get("section", "")
-        skill = comment.get("skill", "")
-
-        print(f"[ReviewExecutor] #{comment_id} [{section}]: {comment.get('issue','')[:80]}")
-
-        if fix == "research" and skill:
-            shared["revision_scope"] = {"mode": "research", "target_skill": skill,
-                                        "target_section": section}
-            print(f"[ReviewExecutor] → research: {skill}")
-            return "research"
-
-        shared["revision_scope"] = {"mode": "write", "target_section": section}
-        print(f"[ReviewExecutor] → rewrite: {section}")
-        return "write"
+        # Append revision steps to plan tail
+        plan = shared.get("plan", [])
+        next_id = max((t["id"] for t in plan), default=0) + 1
+        for comment in pending:
+            comment_id = comment.get("id")
+            shared.setdefault("addressed_comments", []).append(comment_id)
+            fix = comment.get("fix", "rewrite")
+            section = comment.get("section", "")
+            skill = comment.get("skill", "")
+            print(f"[ReviewExecutor] #{comment_id} [{section}]: {comment.get('issue','')[:80]}")
+            if fix == "research" and skill:
+                plan.append({"id": next_id, "type": "research", "skill": skill,
+                             "task": f"Additional research for {section}: {comment.get('issue','')[:60]}",
+                             "status": "pending"})
+                print(f"[ReviewExecutor] → appended research:{skill}")
+            else:
+                plan.append({"id": next_id, "type": "write", "skill": "scientific-writing",
+                             "section": section,
+                             "task": f"Rewrite {section}: {comment.get('issue','')[:60]}",
+                             "status": "pending"})
+                print(f"[ReviewExecutor] → appended write:{section}")
+            next_id += 1
+        shared["plan"] = plan
+        return "execute"
 
 
 # ===================================================================

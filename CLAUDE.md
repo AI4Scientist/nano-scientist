@@ -12,14 +12,14 @@ python main.py --list-skills
 ## Pipeline
 ```
 Initializer
-  → PlanExecutor
-  → ResearchExecutor (loop)
-  → WritingExecutor (loop)
-  → ReviewExecutor → [research / write / compile]
+  → PlanInitialExecutor
+  → PlanDrivenExecutor (loop)
+  → ReviewExecutor → [execute / compile]
   → CompileTeX ↔ FixTeX → Finisher
 ```
-PlanExecutor drafts a structured todo list (feedforward control); ResearchExecutor marks items done and refines it (feedback control).
-ReviewExecutor dispatches revisions directly into the research/writing loops.
+PlanInitialExecutor drafts a typed todo list (research + write steps).
+PlanDrivenExecutor executes each step in order; optionally revises remaining plan after each step.
+ReviewExecutor appends revision steps to the plan tail and loops back to PlanDrivenExecutor.
 LaTeX compilation runs **exactly once**, as the final PDF generation step.
 
 ## Architecture
@@ -27,10 +27,9 @@ LaTeX compilation runs **exactly once**, as the final PDF generation step.
 | Node | Role |
 |---|---|
 | **Initializer** | Zero LLM calls — infers report type from budget, creates `outputs/<uuid>/` |
-| **PlanExecutor** | One LLM call — drafts a 3–7 step ordered research plan into `shared["plan"]`; falls back to free-choice if parse fails |
-| **ResearchExecutor** | Autonomous loop: follows plan → picks one skill → inline decompose (2–5 steps) → execute; marks plan items done; self-loops until budget threshold; *scoped mode*: runs a single revision-directed skill then exits to `write` |
-| **WritingExecutor** | Autonomous loop: picks one section → writes LaTeX; self-loops until all sections done; *scoped mode*: rewrites one targeted section then exits to `review` |
-| **ReviewExecutor** | Assembles fresh draft, runs peer-review; dispatches top major comment → `research` / `write`; returns `compile` when accepted; controlled by `MAX_REVIEW_ROUNDS` (default 1) |
+| **PlanInitialExecutor** | One LLM call — drafts typed research+write steps into `shared["plan"]` |
+| **PlanDrivenExecutor** | Loop: pops next pending step → executes (`_run_skill` or `_write_section`) → optionally revises remaining plan; exits to `review` when plan exhausted or budget low |
+| **ReviewExecutor** | Assembles fresh draft, runs peer-review; appends revision steps to plan tail → loops to `execute`; returns `compile` when accepted; controlled by `MAX_REVIEW_ROUNDS` (default 1) |
 | **CompileTeX** | `pdflatex` + `bibtex` pipeline; up to 2 fix attempts |
 | **FixTeX** | Patches citation or LaTeX errors, retries compile |
 | **Finisher** | Writes `cost_log.json` + `summary.json`, prints total cost |
@@ -38,16 +37,15 @@ LaTeX compilation runs **exactly once**, as the final PDF generation step.
 ## Key files
 | File | Role |
 |---|---|
-| `src/nodes.py` | 8 nodes + module-level helpers (`_run_skill`, `_write_section`, `_assemble_tex`, `_artifact_index`, `_recent_history`, `_plan_context`, `_run_code_blocks`, `_save_artifact`) |
+| `src/nodes.py` | 7 nodes + module-level helpers (`_run_skill`, `_write_section`, `_assemble_tex`, `_artifact_index`, `_recent_history`, `_plan_context`, `_run_code_blocks`, `_save_artifact`) |
 | `src/flow.py` | PocketFlow wiring |
 | `src/utils.py` | LLM client (`call_llm`, `call_llm_with_tools`), tiktoken counter, cost tracking, BibTeX utils, skill index loading/filtering |
 | `skills/skills.json` | Skill index (id + description) |
-| `docs/PAPER_QUALITY_STANDARD.md` | Writing quality guide |
 
 ## Shared store keys
-`topic`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `report_type`, `history`, `plan`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `failed_code`, `review_rounds`, `review_comments`, `addressed_comments`, `revision_scope`, `fix_attempts`, `api_keys`
+`topic`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `report_type`, `history`, `plan`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `failed_code`, `review_rounds`, `review_comments`, `addressed_comments`, `fix_attempts`, `api_keys`
 
-`plan` format: `[{"id": int, "task": str, "skill": str, "status": "pending"|"in_progress"|"done"}]`
+`plan` format: `[{"id": int, "type": "research"|"write", "task": str, "skill": str, "section": str (write steps only), "status": "pending"|"in_progress"|"done"|"failed"}]`
 
 ## Budget reserves
 | Constant | Value | Purpose |
@@ -64,12 +62,21 @@ Agent: `LOOKBACK` (default 3), `MAX_REVIEW_ROUNDS` (default 1).
 
 ## Conventions
 - Skills: `skills/<name>/SKILL.md` — lazy-loaded; index in `skills/skills.json`
-- Skills with `allowed-tools: Bash` get a real tool-calling loop via `call_llm_with_tools`: the model drives bash execution, sees stdout/stderr, and can retry on error (up to 8 rounds)
+- Skills with `allowed-tools: Bash` get a real tool-calling loop via `call_llm_with_tools`: the model drives bash execution, sees stdout/stderr, and can retry on error (up to 16 rounds; configurable via `MAX_TOOL_ROUNDS` env var)
 - Skills without `allowed-tools` use plain `call_llm` (no tools exposed)
 - BibTeX via `%%BEGIN BIBTEX%%...%%END BIBTEX%%`, deduplicated by `dedup_bibtex()`
 - Sections via `%%BEGIN SECTION%%...%%END SECTION%%`
 - `required-keys` frontmatter field declares which API keys a skill needs; skills are filtered out at startup if the key is missing
 - Output: `outputs/<uuid>/` — do not commit
+
+## Pasting trace output in chat
+When pasting `python main.py` terminal traces into the chat, always wrap them in a code fence:
+````
+```
+[trace output here]
+```
+````
+This prevents the OMC keyword detector from false-triggering autopilot/ecomode modes on words like "autopilot", "research", etc. that appear in trace text.
 
 ## Adding a skill
 1. `skills/<name>/SKILL.md` with YAML frontmatter:

@@ -34,10 +34,15 @@ def init_env(env_path: str = None):
 API_KEY_REGISTRY = {
     # --- REQUIRED ---
     "OPENROUTER_API_KEY": "[REQUIRED] Core LLM inference — every node calls the LLM through OpenRouter; without this key the agent cannot run at all",
-    "HF_TOKEN":           "[REQUIRED] Hugging Face Hub — needed for tooluniverse skill (model/dataset discovery); without this key tooluniverse cannot be used",
-    "GITHUB_TOKEN":       "[REQUIRED] GitHub API — needed for github-mining skill (code/repo search); without this key github-mining cannot be used",
-    # --- OPTIONAL ---
+    # --- SKILL-GATED ---
+    "GOOGLE_API_KEY":     "Required by nano-banana (Gemini image generation for slides)",
+    "S2_API_KEY":         "Required by paper-navigator (Semantic Scholar search and citation traversal)",
+    "GITHUB_TOKEN":       "Required by paper-navigator and experiment skills (GitHub code/repo search)",
+    "HF_TOKEN":           "Required by experiment skills (Hugging Face model/dataset discovery)",
     "OPENAI_API_KEY":     "Required by paper-2-web (HTML/video/poster export)",
+    # --- MCP SERVER KEYS ---
+    "PERPLEXITY_API_KEY": "Required by perplexity MCP server (AI-powered web search)",
+    "CONTEXT7_API_KEY":   "Optional: context7 MCP server (higher rate limits for doc lookup)",
 }
 
 
@@ -279,7 +284,7 @@ def call_llm_with_tools(
     system: str = None,
     budget_remaining: float = None,
     cwd: str = ".",
-    max_tool_rounds: int = 8,
+    max_tool_rounds: int = None,
     cost_log: list = None,
 ) -> tuple[str, dict]:
     """Call the LLM with Bash tool access and feed execution results back until done.
@@ -290,6 +295,8 @@ def call_llm_with_tools(
 
     Returns (final_text, aggregated_usage_dict).
     """
+    if max_tool_rounds is None:
+        max_tool_rounds = int(os.environ.get("MAX_TOOL_ROUNDS", "16"))
     calls_left = estimate_calls_remaining(budget_remaining or 0, cost_log=cost_log)
     budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(calls=calls_left)
     full_system = budget_ctx
@@ -364,12 +371,20 @@ def call_llm_with_tools(
 
         if round_i == max_tool_rounds - 1:
             print(f"[call_llm_with_tools] Reached max_tool_rounds={max_tool_rounds}, stopping.")
+            return final_text, {
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "cost": total_cost,
+                "estimated_input_tokens": total_input,
+                "tool_rounds_exhausted": True,
+            }
 
     return final_text, {
         "input_tokens": total_input,
         "output_tokens": total_output,
         "cost": total_cost,
         "estimated_input_tokens": total_input,
+        "tool_rounds_exhausted": False,
     }
 
 
@@ -464,6 +479,64 @@ def format_skill_index(index: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def load_mcp_config(mcp_dir: str = None) -> dict:
+    """Load MCP server config from mcp/mcp.json.
+
+    Returns the parsed dict, or {} if the file is missing or malformed.
+    mcp_dir defaults to <project_root>/mcp/.
+    """
+    if mcp_dir is None:
+        mcp_dir = str(Path(__file__).resolve().parents[1] / "mcp")
+    config_path = Path(mcp_dir) / "mcp.json"
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        return data.get("mcpServers", {})
+    except Exception:
+        return {}
+
+
+def filter_mcp_servers(servers: dict, api_keys: dict[str, bool]) -> dict:
+    """Remove MCP servers whose required env key is missing.
+
+    Servers with no env_key (or env_optional=true) are always included.
+    """
+    available = {}
+    for name, cfg in servers.items():
+        env_key = cfg.get("env_key")
+        optional = cfg.get("env_optional", False)
+        if env_key and not optional and not api_keys.get(env_key):
+            continue
+        available[name] = cfg
+    return available
+
+
+def format_mcp_context(servers: dict) -> str:
+    """Format available MCP servers as a compact context block for LLM prompts.
+
+    Only included when the skill has Bash access — the LLM can invoke these
+    servers via bash commands if the appropriate client is installed.
+    """
+    if not servers:
+        return ""
+    lines = ["## Available MCP servers (invoke via bash if needed)"]
+    for name, cfg in servers.items():
+        desc = cfg.get("description", "")
+        transport = cfg.get("transport", "")
+        url = cfg.get("url", "")
+        cmd = cfg.get("command", "")
+        if url:
+            loc = url
+        elif cmd:
+            args = " ".join(cfg.get("args", []))
+            loc = f"{cmd} {args}".strip()
+        else:
+            loc = transport
+        lines.append(f"- {name}: {desc} ({loc})")
+    return "\n".join(lines)
+
+
 def parse_yaml_response(text: str):
     """Extract and parse a YAML block from an LLM response.
 
@@ -482,9 +555,23 @@ def parse_yaml_response(text: str):
     block = match.group(1).strip() if match else text.strip()
     try:
         result = yaml.safe_load(block)
-        return result if isinstance(result, (dict, list)) else None
+        if isinstance(result, (dict, list)):
+            return result
     except yaml.YAMLError:
-        return None
+        pass
+
+    # Last resort: find first line starting with "- " and parse from there
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("- "):
+            candidate = "\n".join(lines[i:])
+            try:
+                result = yaml.safe_load(candidate)
+                if isinstance(result, (dict, list)):
+                    return result
+            except yaml.YAMLError:
+                break
+    return None
 
 
 def extract_bibtex(text: str) -> tuple[str, list[str]]:

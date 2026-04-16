@@ -1,10 +1,10 @@
 # Nano-scientist
 
-> **Nano. Lean. Two loops, one budget, one paper.**
+> **Nano. Lean. One plan, one loop, one paper.**
 
 <img width="1200" height="800" alt="Nano-scientist" src="https://github.com/user-attachments/assets/fadce36b-34c2-4649-97f0-16c257b55d3d" />
 
-An autonomous research agent that turns a topic into a peer-reviewed technical report — within a dollar budget you set. The entire agent is ~4 files, 8 nodes, ~20 skills. No framework bloat, no orchestration overhead.
+An autonomous research agent that turns a topic into a peer-reviewed technical report — within a dollar budget you set. The entire agent is ~4 files, 7 nodes, ~20 skills. No framework bloat, no orchestration overhead.
 
 Built on [PocketFlow](https://github.com/The-Pocket/PocketFlow). Directly inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch): fix the budget, run the loops, let the agent figure out the rest.
 
@@ -14,17 +14,12 @@ Built on [PocketFlow](https://github.com/The-Pocket/PocketFlow). Directly inspir
 
 ```mermaid
 flowchart TD
-    I([Initializer]) --> PL[PlanExecutor]
-    PL -->|research| RE
+    I([Initializer]) --> PL[PlanInitialExecutor]
+    PL -->|execute| EX
 
-    subgraph RESEARCH["Research Loop"]
-        RE[ResearchExecutor]
-        RE -->|research| RE
-    end
-
-    subgraph WRITING["Writing Loop"]
-        WE[WritingExecutor]
-        WE -->|write| WE
+    subgraph PLAN["Plan Loop"]
+        EX[PlanDrivenExecutor]
+        EX -->|execute| EX
     end
 
     subgraph COMPILE["Compile & Fix"]
@@ -34,10 +29,8 @@ flowchart TD
         FT -->|compile| CT
     end
 
-    RE -->|write| WE
-    WE -->|review| RV[ReviewExecutor]
-    RV -->|research| RE
-    RV -->|write| WE
+    EX -->|review| RV[ReviewExecutor]
+    RV -->|execute| EX
     RV -->|compile| CT
     CT -->|done| F([Finisher])
     FT -->|done| F
@@ -48,15 +41,14 @@ flowchart TD
 | Stage | What happens |
 |---|---|
 | **Initializer** | Infers report type from budget, sets up `outputs/<uuid>/` — zero LLM calls |
-| **PlanExecutor** | One LLM call — drafts a 3–7 step ordered research plan (feedforward); stores it in shared state so each loop iteration can mark items done (feedback) |
-| **ResearchExecutor** | Autonomous loop: follows plan → picks one skill per iteration, decomposes it inline (2–5 steps), executes; marks plan items complete; self-loops until budget threshold; supports *scoped mode* for revision-directed research |
-| **WritingExecutor** | Autonomous loop: picks one section per iteration, writes LaTeX; self-loops until all sections done; supports *scoped mode* for targeted rewrites |
-| **ReviewExecutor** | Assembles the full draft and runs peer-review; dispatches the top major comment directly to research or rewrite; returns `compile` when the draft is accepted |
+| **PlanInitialExecutor** | One LLM call — drafts a typed end-to-end plan: research steps then write steps, one per section |
+| **PlanDrivenExecutor** | Loop: pops next pending step → runs `_run_skill` (research) or `_write_section` (write) directly; optionally revises remaining steps based on new findings; exits to review when plan is exhausted |
+| **ReviewExecutor** | Assembles the full draft and runs peer-review; appends revision steps to the plan tail and loops back; returns `compile` when accepted |
 | **CompileTeX** | Runs `pdflatex` + `bibtex` to produce a PDF — runs **exactly once** |
 | **FixTeX** | Patches undefined citations or LaTeX errors and recompiles |
 | **Finisher** | Writes `cost_log.json` + `summary.json`, prints total cost |
 
-> **Why nano?** The core is intentionally tiny — 4 source files, ~1,100 lines total. Three mandatory stages (Research → Write → Review) with the review node handling revision dispatch directly. The budget is the only knob.
+> **Why nano?** The core is intentionally tiny — 4 source files, ~1,600 lines total. One plan-driven loop replaces the old research + writing loops. The plan is mutable: each completed step can revise what comes next. The budget is the only knob.
 
 ---
 
@@ -215,8 +207,6 @@ nano-scientist/
 │   ├── skills.json      # skill index (id + description)
 │   └── <skill-name>/
 │       └── SKILL.md     # instructions + optional YAML frontmatter
-├── docs/
-│   └── PAPER_QUALITY_STANDARD.md
 ├── outputs/             # generated reports (git-ignored)
 └── .env                 # API keys (git-ignored)
 ```

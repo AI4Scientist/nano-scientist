@@ -1,104 +1,56 @@
 {
   "skills": [
     {
-      "id": "citation-management",
-      "name": "citation-management",
-      "description": "Comprehensive citation management for academic research. Search Google Scholar and PubMed for papers, extract accurate metadata, validate citations, and generate properly formatted BibTeX entries. Use when finding papers, verifying citation information, converting DOIs to BibTeX, or ensuring reference accuracy in scientific writing."
+      "id": "academic-slides",
+      "description": "Create or refine academic slide decks and conference talks: narrative arc, slide structure, visual hierarchy, .pptx generation, rehearsal, and Q&A preparation."
     },
     {
-      "id": "data-visualization",
-      "name": "data-visualization",
-      "description": "Creates effective data visualizations using various libraries and tools, with focus on clarity and insight communication. Trigger keywords: chart, graph, plot, visualization, dashboard, matplotlib, d3, plotly, visualization."
+      "id": "evo-memory",
+      "description": "Manage persistent research memory across cycles: update Ideation Memory (M_I) and Experimentation Memory (M_E) via IDE/IVE/ESE evolution mechanisms."
     },
     {
-      "id": "github-mining",
-      "name": "github-mining",
-      "description": "Mine GitHub repositories using the REST API for empirical software engineering research. Collect commits, issues, pull requests, contributors, file trees, and repository statistics with proper pagination and rate-limit handling. Use for analyzing open-source project evolution, contributor patterns, issue taxonomies, domain coverage gaps, and collaboration networks. Requires GITHUB_TOKEN."
+      "id": "experiment-craft",
+      "description": "Debug and iterate on existing experiments: 5-step diagnostic flow (collect failures, find working version, bridge gap, hypothesize, fix), structured experiment logging."
     },
     {
-      "id": "generate-image",
-      "name": "generate-image",
-      "description": "Generate or edit images using AI models (FLUX, Gemini). Use for general-purpose image generation including photos, illustrations, artwork, visual assets, concept art, and any image that is not a technical diagram or schematic. For flowcharts, circuits, pathways, and technical diagrams, use the scientific-schematics skill instead."
+      "id": "experiment-iterative-coder",
+      "description": "Iterative code refinement via plan→code→evaluate→refine cycles with lint/test scoring. Use for high-quality code generation requiring 3–10 iterations."
     },
     {
-      "id": "hypothesis-generation",
-      "name": "hypothesis-generation",
-      "description": "Structured hypothesis formulation from observations. Use when you have experimental observations or data and need to formulate testable hypotheses with predictions, propose mechanisms, and design experiments to test them. Follows scientific method framework."
+      "id": "experiment-pipeline",
+      "description": "Structured 4-stage experiment execution: baseline reproduction, hyperparameter tuning, proposed method validation, ablation study. Integrates with evo-memory and experiment-craft."
     },
     {
-      "id": "latex-posters",
-      "name": "latex-posters",
-      "description": "Create professional research posters in LaTeX using beamerposter, tikzposter, or baposter. Support for conference presentations, academic posters, and scientific communication. Includes layout design, color schemes, multi-column formats, figure integration, and poster-specific best practices for visual communication."
+      "id": "nano-banana",
+      "description": "Generate professional presentation slides as images via Gemini image generation API with interactive browser review, iterative editing, and PPTX packaging."
     },
     {
-      "id": "literature-review",
-      "name": "literature-review",
-      "description": "Conduct comprehensive, systematic literature reviews using multiple academic databases (PubMed, arXiv, bioRxiv, Semantic Scholar, etc.). Creates professionally formatted markdown documents and PDFs with verified citations in multiple citation styles (APA, Nature, Vancouver, etc.)."
+      "id": "paper-navigator",
+      "description": "Find and read academic papers: keyword search, citation traversal, arXiv monitoring, trending detection, GitHub search, SOTA lookup, and structured reading notes."
     },
     {
-      "id": "paper-2-web",
-      "name": "paper-2-web",
-      "description": "Convert academic papers into promotional and presentation formats including interactive websites (Paper2Web), presentation videos (Paper2Video), and conference posters (Paper2Poster). Use for paper dissemination, conference preparation, creating explorable academic homepages, generating video abstracts, or producing print-ready posters."
+      "id": "paper-planning",
+      "description": "Pre-writing paper planning: story design (task→challenge→insight→contribution), experiment planning, figure design, 4-week timeline, and mock rejection letter."
     },
     {
-      "id": "peer-review",
-      "name": "peer-review",
-      "description": "Structured manuscript/grant review with checklist-based evaluation. Use when writing formal peer reviews with specific criteria methodology assessment, statistical validity, reporting standards compliance (CONSORT/STROBE), and constructive feedback."
+      "id": "paper-rebuttal",
+      "description": "Write effective peer-review rebuttals: score diagnosis, color-coded comment prioritization, champion strategy, and 18 tactical writing rules."
     },
     {
-      "id": "pptx-posters",
-      "name": "pptx-posters",
-      "description": "Create research posters using HTML/CSS that can be exported to PDF or PPTX. Use ONLY when the user explicitly requests PowerPoint/PPTX poster format. For standard research posters, use latex-posters instead."
+      "id": "paper-review",
+      "description": "Self-review a paper draft before submission: 5-aspect checklist, adversarial stress-testing, reverse-outlining, figure/table quality checks, and prebuttal drafting."
     },
     {
-      "id": "research-grants",
-      "name": "research-grants",
-      "description": "Write competitive research proposals for NSF, NIH, DOE, DARPA, and Taiwan NSTC. Agency-specific formatting, review criteria, budget preparation, broader impacts, significance statements, innovation narratives, and compliance with submission requirements."
+      "id": "paper-writing",
+      "description": "Write academic paper sections using an 11-step workflow with LaTeX templates, counterintuitive writing tactics, and section-by-section guidance."
     },
     {
-      "id": "research-lookup",
-      "name": "research-lookup",
-      "description": "Look up current research information using Perplexity Sonar Pro Search or Sonar Reasoning Pro models through OpenRouter. Automatically selects the best model based on query complexity. Search academic papers, recent studies, technical documentation, and general research information with citations."
+      "id": "research-ideation",
+      "description": "End-to-end research ideation: literature grounding, multi-persona idea generation, ELO tournament ranking, evo-memory update, and manuscript-quality proposal expansion."
     },
     {
-      "id": "scholar-evaluation",
-      "name": "scholar-evaluation",
-      "description": "Systematically evaluate scholarly work using the ScholarEval framework, providing structured assessment across research quality dimensions including problem formulation, methodology, analysis, and writing with quantitative scoring and actionable feedback."
-    },
-    {
-      "id": "scientific-critical-thinking",
-      "name": "scientific-critical-thinking",
-      "description": "Evaluate scientific claims and evidence quality. Use for assessing experimental design validity, identifying biases and confounders, applying evidence grading frameworks (GRADE, Cochrane Risk of Bias), or teaching critical analysis."
-    },
-    {
-      "id": "scientific-schematics",
-      "name": "scientific-schematics",
-      "description": "Create publication-quality scientific diagrams using Nano Banana Pro AI with smart iterative refinement. Specialized in neural network architectures, system diagrams, flowcharts, biological pathways, and complex scientific visualizations."
-    },
-    {
-      "id": "scientific-slides",
-      "name": "scientific-slides",
-      "description": "Build slide decks and presentations for research talks. Use for making PowerPoint slides, conference presentations, seminar talks, research presentations, thesis defense slides, or any scientific talk. Provides slide structure, design templates, timing guidance, and visual validation."
-    },
-    {
-      "id": "scientific-writing",
-      "name": "scientific-writing",
-      "description": "Core skill for deep research and writing. Write scientific manuscripts in full paragraphs (never bullet points). Uses two-stage process with section outlines then flowing prose. IMRAD structure, citations, figures/tables, reporting guidelines (CONSORT/STROBE/PRISMA), for research papers and journal submissions."
-    },
-    {
-      "id": "statistical-analysis",
-      "name": "statistical-analysis",
-      "description": "Statistical analysis toolkit. Hypothesis tests (t-test, ANOVA, chi-square), regression, correlation, Bayesian stats, power analysis, assumption checks, APA reporting, for academic research."
-    },
-    {
-      "id": "tooluniverse",
-      "name": "tooluniverse",
-      "description": "Use this skill when working with scientific research tools and workflows across bioinformatics, cheminformatics, genomics, structural biology, proteomics, and drug discovery. Provides access to 600+ scientific tools including machine learning models, datasets, APIs, and analysis packages."
-    },
-    {
-      "id": "venue-templates",
-      "name": "venue-templates",
-      "description": "Access comprehensive LaTeX templates, formatting requirements, and submission guidelines for major scientific publication venues (Nature, Science, PLOS, IEEE, ACM), academic conferences (NeurIPS, ICML, CVPR, CHI), research posters, and grant proposals (NSF, NIH, DOE, DARPA)."
+      "id": "research-survey",
+      "description": "Generate structured literature survey reports from collected papers: outline generation, draft, section expansion, summary refinement, and final assembly."
     }
   ]
 }

@@ -1,12 +1,12 @@
 """Flow wiring for the Autonomous Scientist agent.
 
 Pipeline:
-  Initializer
-    → ResearchExecutor (loop) → WritingExecutor (loop)
-    → ReviewExecutor → [research / write / compile]
-    → CompileTeX ↔ FixTeX → Finisher
+  Initializer → PlanInitialExecutor → PlanDrivenExecutor (loop)
+              → ReviewExecutor → [execute / compile]
+              → CompileTeX ↔ FixTeX → Finisher
 
-Review dispatches revisions directly into the research/writing loops.
+PlanDrivenExecutor executes each plan step in order (research or write).
+ReviewExecutor appends revision steps to the plan tail and loops back.
 LaTeX compilation happens exactly once, as the final PDF generation step.
 """
 
@@ -14,9 +14,8 @@ from pocketflow import Flow
 
 from .nodes import (
     Initializer,
-    PlanExecutor,
-    ResearchExecutor,
-    WritingExecutor,
+    PlanInitialExecutor,
+    PlanDrivenExecutor,
     ReviewExecutor,
     CompileTeX,
     FixTeX,
@@ -26,32 +25,22 @@ from .nodes import (
 
 def create_scientist_flow() -> Flow:
     init     = Initializer()
-    planner  = PlanExecutor(max_retries=2, wait=3)
-    research = ResearchExecutor(max_retries=2, wait=5)
-    writing  = WritingExecutor(max_retries=2, wait=5)
+    planner  = PlanInitialExecutor(max_retries=2, wait=3)
+    executor = PlanDrivenExecutor(max_retries=2, wait=5)
     review   = ReviewExecutor(max_retries=2, wait=5)
     compile  = CompileTeX(max_retries=1, wait=0)
     fix_tex  = FixTeX(max_retries=2, wait=3)
     finisher = Finisher()
 
-    # Entry: Initializer → PlanExecutor → ResearchExecutor
     init     - "research" >> planner
-    planner  - "research" >> research
+    planner  - "execute"  >> executor
 
-    # Research loop
-    research - "research" >> research
-    research - "write"    >> writing
+    executor - "execute"  >> executor   # loop through plan steps
+    executor - "review"   >> review
 
-    # Writing loop
-    writing  - "write"    >> writing
-    writing  - "review"   >> review
-
-    # Review dispatches revisions directly or proceeds to compile
-    review   - "research" >> research
-    review   - "write"    >> writing
+    review   - "execute"  >> executor   # revision steps appended to plan
     review   - "compile"  >> compile
 
-    # Final PDF generation (runs exactly once)
     compile  - "fix"      >> fix_tex
     compile  - "done"     >> finisher
     fix_tex  - "compile"  >> compile
