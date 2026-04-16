@@ -8,7 +8,10 @@ Usage:
 """
 
 import argparse
+import os
+import shutil
 import sys
+import tempfile
 
 from pathlib import Path
 from src.utils import init_env, load_skill_index, filter_skill_index, detect_api_keys
@@ -16,6 +19,36 @@ from src.flow import create_scientist_flow
 
 # Resolve project paths
 SKILLS_DIR = "skills"
+
+
+class _Tee:
+    """Write to both the original stdout and a file once the path is known."""
+
+    def __init__(self, original):
+        self._orig = original
+        self._file = None
+
+    def set_path(self, path: Path):
+        if self._file is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = path.open("w", encoding="utf-8", buffering=1)
+
+    def write(self, data):
+        self._orig.write(data)
+        if self._file:
+            self._file.write(data)
+
+    def flush(self):
+        self._orig.flush()
+        if self._file:
+            self._file.flush()
+
+    def fileno(self):
+        return self._orig.fileno()
+
+    def close(self):
+        if self._file:
+            self._file.close()
 
 def list_skills():
     """Print available skills (from skills.json index)."""
@@ -66,7 +99,25 @@ def run(topic: str, budget: float, output_dir: str):
     print(f"Budget: ${budget:.2f}")
     print(f"{'='*50}\n")
 
-    flow.run(shared)
+    tmp_fd, tmp_traj_str = tempfile.mkstemp(suffix=".traj.txt")
+    os.close(tmp_fd)
+    tmp_traj = Path(tmp_traj_str)
+
+    tee = _Tee(sys.stdout)
+    tee.set_path(tmp_traj)
+    sys.stdout = tee  # type: ignore[assignment]
+    try:
+        flow.run(shared)
+    finally:
+        sys.stdout = tee._orig
+        tee.close()
+
+    # Move temp traj file into the run's output directory
+    if shared.get("output_path") and tmp_traj.exists():
+        traj_dest = Path(shared["output_path"]) / "traj.txt"
+        shutil.move(str(tmp_traj), traj_dest)
+    elif tmp_traj.exists():
+        tmp_traj.unlink()
 
     return shared
 
