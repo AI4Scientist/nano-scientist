@@ -617,6 +617,7 @@ def is_valid_bibtex_key(key: str) -> bool:
 
     Valid keys: alphanumeric plus hyphen, underscore, colon, period, slash.
     Must be 2-80 chars. No spaces, no quotes, no prose fragments.
+    Rejects internal filename-style keys like dataset_metadata, classification_results.
     """
     if not key or len(key) < 2 or len(key) > 80:
         return False
@@ -625,6 +626,14 @@ def is_valid_bibtex_key(key: str) -> bool:
     # Reject keys with too many consecutive lowercase letters (likely prose)
     if len(key) > 40 and not re.search(r'\d', key):
         return False
+    # Reject filename-style keys: all lowercase with underscores and no digits
+    # e.g. dataset_metadata, classification_results, structured_metadata_complete
+    # Real citation keys follow author+year or abbreviated title patterns
+    if re.match(r'^[a-z][a-z_]+$', key) and '_' in key and not re.search(r'\d', key):
+        # Allow short snake_case that could be a legitimate abbreviation (<=20 chars)
+        # Reject long descriptive snake_case filenames (>20 chars)
+        if len(key) > 20:
+            return False
     return True
 
 

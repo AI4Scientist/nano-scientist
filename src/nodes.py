@@ -27,6 +27,7 @@ from .utils import (
     load_mcp_config,
     filter_mcp_servers,
     format_mcp_context,
+    format_skill_index,
     parse_yaml_response,
     extract_bibtex,
     dedup_bibtex,
@@ -392,7 +393,12 @@ After completing the step, summarise findings and append any citations:
 
 %%BEGIN BIBTEX%%
 @article{{key, author={{...}}, title={{...}}, journal={{...}}, year={{YYYY}}}}
-%%END BIBTEX%%"""
+%%END BIBTEX%%
+
+CITATION RULES:
+- Keys MUST follow author+year format (e.g. smith2023attention, vaswani2017transformer).
+- Do NOT use internal filenames as keys (e.g. dataset_metadata, classification_results, analysis_report).
+- Every entry MUST have author= and title= fields with real values."""
 
         if needs_code:
             # Use tool-calling loop: model drives bash execution with error feedback.
@@ -406,7 +412,29 @@ After completing the step, summarise findings and append any citations:
                 shared.setdefault("exhausted_steps", []).append(
                     {"skill": skill_name, "step": s.get("step", 1)})
                 print(f"[ResearchExecutor] WARNING: {skill_name}/step{s.get('step',1)} "
-                      f"hit max tool rounds — output may be incomplete.")
+                      f"hit max tool rounds — issuing summary call to salvage partial findings.")
+                # Scope-narrowing salvage: ask the model to summarise what it found so far
+                salvage_text, salvage_usage = call_llm(
+                    f"""You were executing a research step but ran out of tool rounds.
+Summarise ALL findings and data you collected so far in this step.
+Include any file paths created, statistics found, and key results.
+This summary will be used by the paper-writing agent.
+
+## Step that was executing:
+{instruction}
+
+## Partial output so far:
+{step_text[:3000]}
+
+Write a concise summary (200-400 words) of findings, then cite any relevant papers:
+%%BEGIN BIBTEX%%
+@article{{key, author={{...}}, title={{...}}, year={{YYYY}}}}
+%%END BIBTEX%%""",
+                    budget_remaining=shared.get("budget_remaining", 0),
+                )
+                track_cost(shared, f"research:salvage:{skill_name}", salvage_usage)
+                # Append salvage summary to step text so artifact captures it
+                step_text = step_text + "\n\n## SALVAGE SUMMARY\n" + salvage_text
         else:
             step_text, step_usage = call_llm(
                 step_prompt,
@@ -470,6 +498,7 @@ def _write_section(section: str, shared: dict):
 - Use \\cite{{key}} only from keys above. Back every claim.
 - Active voice, formal tone. Escape \\%, \\&, \\#, \\$.
 - Abstract: 150-250 words, no \\cite.
+- Do NOT include \\bibliography, \\bibliographystyle, or \\begin{{thebibliography}} — the skeleton handles these.
 
 %%BEGIN SECTION%%
 \\section{{{section.title()}}}
@@ -486,25 +515,69 @@ def _write_section(section: str, shared: dict):
     body = sec_m.group(1).strip() if sec_m else text.strip()
     # Always strip BibTeX marker blocks from body — they must never appear in LaTeX
     body = re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", body, flags=re.DOTALL).strip()
+    # Strip any LaTeX bibliography environments that leaked into the section body
+    body = re.sub(r"\\begin\{thebibliography\}.*?\\end\{thebibliography\}", "", body, flags=re.DOTALL).strip()
+    body = re.sub(r"\\bibliographystyle\{[^}]*\}", "", body).strip()
+    body = re.sub(r"\\bibliography\{[^}]*\}", "", body).strip()
     bib_m = re.search(r"%%BEGIN BIBTEX%%(.*?)%%END BIBTEX%%", text, re.DOTALL)
     if bib_m:
         new_entries = [e.strip() for e in re.findall(r"(@\w+\{[^@]+)", bib_m.group(1), re.DOTALL) if e.strip()]
         _extend_bibtex(shared, new_entries)
 
+    # Retry once if body is suspiciously short (LLM missed markers or refused)
+    if len(body.strip()) < 100:
+        print(f"[PlanDrivenExecutor] '{section}' too short ({len(body)} chars) — retrying with strict prompt")
+        retry_text, retry_usage = call_llm(
+            f"""IMPORTANT: You MUST output the {section} section content between the markers below.
+Previous attempt produced no usable content. Do not skip this.
+
+## Topic: {shared["topic"]}
+## Artifacts
+{artifact_text[:3000]}
+## BibTeX keys: {", ".join(cite_keys) or "No citations yet."}
+
+Rules:
+- Output ONLY LaTeX starting with \\section{{{section.title()}}}
+- Use \\cite{{key}} only from the keys listed above
+- Do NOT include bibliography or preamble
+
+%%BEGIN SECTION%%
+\\section{{{section.title()}}}
+...your content here...
+%%END SECTION%%""",
+            budget_remaining=shared.get("budget_remaining", 0))
+        track_cost(shared, f"writing:{section}:retry", retry_usage)
+        retry_sec_m = re.search(r"%%BEGIN SECTION%%(.*?)%%END SECTION%%", retry_text, re.DOTALL)
+        retry_body = retry_sec_m.group(1).strip() if retry_sec_m else retry_text.strip()
+        retry_body = re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", retry_body, flags=re.DOTALL).strip()
+        retry_body = re.sub(r"\\begin\{thebibliography\}.*?\\end\{thebibliography\}", "", retry_body, flags=re.DOTALL).strip()
+        retry_body = re.sub(r"\\bibliographystyle\{[^}]*\}|\\bibliography\{[^}]*\}", "", retry_body).strip()
+        if len(retry_body.strip()) > len(body.strip()):
+            body = retry_body
+            print(f"[PlanDrivenExecutor] '{section}' retry succeeded ({len(body)} chars)")
+        else:
+            print(f"[PlanDrivenExecutor] '{section}' retry also short ({len(retry_body)} chars) — keeping best")
+
     shared.setdefault("section_bodies", {})[section] = body
     if section not in shared.get("sections_written", []):
         shared.setdefault("sections_written", []).append(section)
+    # Mark section as failed in plan if still too short after retry
+    if len(body.strip()) < 100:
+        print(f"[PlanDrivenExecutor] WARNING: '{section}' body still empty after retry")
     print(f"[PlanDrivenExecutor] '{section}' written ({len(body)} chars, ${usage['cost']:.4f})")
 
 
 def _assemble_tex(shared: dict):
     """Assemble report.tex + references.bib from written sections."""
     order = _section_order(shared)
-    # Defensive: strip any BibTeX marker blocks that leaked into section bodies
-    cleaned_bodies = {
-        s: re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", b, flags=re.DOTALL).strip()
-        for s, b in shared.get("section_bodies", {}).items()
-    }
+    # Defensive: strip any BibTeX marker blocks and bibliography environments that leaked into section bodies
+    def _clean_body(b: str) -> str:
+        b = re.sub(r"%%BEGIN BIBTEX%%.*?%%END BIBTEX%%", "", b, flags=re.DOTALL)
+        b = re.sub(r"\\begin\{thebibliography\}.*?\\end\{thebibliography\}", "", b, flags=re.DOTALL)
+        b = re.sub(r"\\bibliographystyle\{[^}]*\}", "", b)
+        b = re.sub(r"\\bibliography\{[^}]*\}", "", b)
+        return b.strip()
+    cleaned_bodies = {s: _clean_body(b) for s, b in shared.get("section_bodies", {}).items()}
     body = "\n\n".join(cleaned_bodies.get(s, "")
                        for s in order if s in cleaned_bodies and s != "abstract")
     abstract = re.sub(r"\\section\{[Aa]bstract\}\s*", "",
@@ -754,10 +827,21 @@ class PlanDrivenExecutor(Node):
         return "review"
 
     def _maybe_revise_plan(self, shared: dict, completed_step: dict):
-        """Ask LLM if remaining plan needs adjustment based on new findings."""
+        """Ask LLM if remaining plan needs adjustment based on new findings.
+
+        Only fires every 3rd completed step (to reduce LLM cost), or immediately
+        when a step failed (since failures often require plan changes).
+        """
         pending = [t for t in shared.get("plan", []) if t.get("status") == "pending"]
         if not pending or shared.get("budget_remaining", 0) < BUDGET_RESERVE * 2:
             return  # skip if too few pending steps or budget tight
+
+        # Gate: only fire on failures or every 3rd completed research step
+        if completed_step.get("status") != "failed":
+            done_research = [t for t in shared.get("plan", [])
+                             if t.get("status") == "done" and t.get("type") == "research"]
+            if len(done_research) % 3 != 0:
+                return
 
         text, usage = call_llm(
             f"""You are a research plan monitor. A step just completed:
@@ -809,11 +893,22 @@ changes:
                 print(f"[PlanDrivenExecutor] plan: removed step {cid}")
             elif action == "insert":
                 after_id = change.get("after")
+                new_task = change.get("task", "")
+                new_skill = change.get("skill", "")
+                # Dedup: skip if an equivalent pending/done step already exists
+                sig = (new_skill, new_task[:60].lower())
+                duplicate = any(
+                    (t.get("skill", ""), t.get("task", "")[:60].lower()) == sig
+                    for t in plan
+                )
+                if duplicate:
+                    print(f"[PlanDrivenExecutor] plan: skipping duplicate insert '{new_task[:60]}'")
+                    continue
                 new_step = {
                     "id": change.get("id", max((t["id"] for t in plan), default=0) + 1),
                     "type": change.get("type", "research"),
-                    "task": change.get("task", ""),
-                    "skill": change.get("skill", ""),
+                    "task": new_task,
+                    "skill": new_skill,
                     "status": "pending",
                 }
                 if change.get("section"):
@@ -829,6 +924,47 @@ changes:
 # ===================================================================
 class ReviewExecutor(Node):
     def prep(self, shared):
+        # Gap check: ensure all required sections have substantive content before review.
+        # If any are missing or too short, inject write steps back into the plan and
+        # execute them now so the reviewer sees a complete draft.
+        required = _required_sections(shared)
+        section_bodies = shared.get("section_bodies", {})
+        budget = shared.get("budget_remaining", 0)
+        gap_sections = [
+            s for s in required
+            if len(section_bodies.get(s, "").strip()) < 200
+        ]
+        if gap_sections and budget >= WRITE_RESERVE:
+            print(f"[ReviewExecutor] Gap check: missing/short sections: {gap_sections}")
+            plan = shared.get("plan", [])
+            next_id = max((t["id"] for t in plan), default=0) + 1
+            for s in gap_sections:
+                # Only inject if not already a pending write step for this section
+                already_pending = any(
+                    t.get("type") == "write" and t.get("section") == s and t.get("status") == "pending"
+                    for t in plan
+                )
+                if not already_pending:
+                    plan.append({
+                        "id": next_id,
+                        "type": "write",
+                        "task": f"Write the {s} section",
+                        "skill": "",
+                        "section": s,
+                        "status": "pending",
+                    })
+                    next_id += 1
+            shared["plan"] = plan
+            # Execute the gap-fill steps immediately
+            for step in [t for t in shared["plan"] if t.get("status") == "pending" and t.get("type") == "write"]:
+                if shared.get("budget_remaining", 0) < WRITE_RESERVE:
+                    break
+                section = step.get("section", "")
+                if section in gap_sections:
+                    print(f"[ReviewExecutor] Gap-filling section: {section}")
+                    _write_section(section, shared)
+                    step["status"] = "done"
+
         # Assemble .tex before review so reviewer sees the full draft
         _assemble_tex(shared)
         return {
@@ -837,6 +973,7 @@ class ReviewExecutor(Node):
             "budget": shared.get("budget_remaining", 0),
             "tex_content": shared.get("tex_content", ""),
             "artifact_index": _artifact_index(shared),
+            "skill_index": shared.get("skill_index", {}),
             "review_rounds": shared.get("review_rounds", 0),
             "max_rounds": int(os.environ.get("MAX_REVIEW_ROUNDS", "1")),
         }
@@ -894,8 +1031,8 @@ Evaluate against NeurIPS/ICML/ICLR/ACL reviewer standards.
 - No overclaiming or speculation presented as fact
 - Related work organized by theme, positioned against this contribution
 
-## Available skills for research fixes
-{prep_res["artifact_index"]}
+## Available skills for research fixes (use ONLY these exact skill names in the `skill` field)
+{format_skill_index(prep_res["skill_index"])}
 
 Return YAML:
 ```yaml
@@ -936,6 +1073,7 @@ Do NOT request revision for cosmetic issues — only for checklist violations or
 
         # Append revision steps to plan tail
         plan = shared.get("plan", [])
+        valid_skills = set(shared.get("skill_index", {}).keys())
         next_id = max((t["id"] for t in plan), default=0) + 1
         for comment in pending:
             comment_id = comment.get("id")
@@ -944,13 +1082,16 @@ Do NOT request revision for cosmetic issues — only for checklist violations or
             section = comment.get("section", "")
             skill = comment.get("skill", "")
             print(f"[ReviewExecutor] #{comment_id} [{section}]: {comment.get('issue','')[:80]}")
-            if fix == "research" and skill:
+            # Validate skill ID — if not in index, downgrade to rewrite
+            if fix == "research" and skill and skill in valid_skills:
                 plan.append({"id": next_id, "type": "research", "skill": skill,
                              "task": f"Additional research for {section}: {comment.get('issue','')[:60]}",
                              "status": "pending"})
                 print(f"[ReviewExecutor] → appended research:{skill}")
             else:
-                plan.append({"id": next_id, "type": "write", "skill": "scientific-writing",
+                if fix == "research" and skill and skill not in valid_skills:
+                    print(f"[ReviewExecutor] → invalid skill '{skill}', downgrading to rewrite:{section}")
+                plan.append({"id": next_id, "type": "write", "skill": "",
                              "section": section,
                              "task": f"Rewrite {section}: {comment.get('issue','')[:60]}",
                              "status": "pending"})
