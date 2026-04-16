@@ -220,3 +220,18 @@ nanoscientist/
 ├── outputs/             # generated reports (git-ignored)
 └── .env                 # API keys (git-ignored)
 ```
+
+---
+
+## 📌 Citation
+
+If you use Nanoscientist in your research, please cite:
+
+```bibtex
+@software{nanoscientist2026,
+  title  = {Nanoscientist: Autonomous Research Agent for Budget-Constrained Scientific Reports},
+  author = {{AI4Scientist Team}},
+  year   = {2026},
+  url    = {https://github.com/AI4Scientist/nanoscientist}
+}
+```
