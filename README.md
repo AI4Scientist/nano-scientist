@@ -71,7 +71,7 @@ flowchart TD
 
 ```bash
 # 1. Clone
-git clone https://github.com/your-org/nano-scientist
+git clone https://github.com/AI4Scientist/nano-scientist
 cd nano-scientist
 
 # 2. Install dependencies
