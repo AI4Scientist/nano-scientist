@@ -134,6 +134,25 @@ Report type is inferred from budget at startup. Actual cost depends on model pri
 
 ---
 
+## MCP Servers
+
+Skills with `allowed-tools: Bash` automatically see available MCP servers injected into their prompt. Servers are defined in `mcp/mcp.json` and filtered at runtime based on which API keys are set.
+
+| Server | What it provides | Required key |
+|---|---|---|
+| `arxiv` | Search & fetch academic papers | — |
+| `context7` | Library/framework docs lookup | `CONTEXT7_API_KEY` (optional) |
+| `deepwiki` | GitHub repo documentation | — |
+| `docs-langchain` | LangChain agent-building docs | — |
+| `exa` | Neural web search & content retrieval | — |
+| `perplexity` | AI-powered web search | `PERPLEXITY_API_KEY` |
+| `sequential-thinking` | Chain-of-thought reasoning steps | — |
+| `ssh` | Remote command execution over SSH | — |
+
+Add a new server by creating `mcp/<name>.yaml` and adding its entry to `mcp/mcp.json`. The agent picks it up automatically on the next run.
+
+---
+
 ## Skills
 
 Each skill is a folder under `skills/` with a `SKILL.md` that the agent reads at runtime (lazy-loaded — only the active skill is ever in context). Skills with `allowed-tools: Bash` get a real tool-calling loop with bash execution and error feedback.
@@ -217,6 +236,9 @@ nano-scientist/
 │   ├── skills.json      # skill index (id + description)
 │   └── <skill-name>/
 │       └── SKILL.md     # instructions + optional YAML frontmatter
+├── mcp/                 # MCP server definitions
+│   ├── mcp.json         # server registry (loaded at runtime)
+│   └── <server>.yaml    # per-server config
 ├── outputs/             # generated reports (git-ignored)
 └── .env                 # API keys (git-ignored)
 ```
