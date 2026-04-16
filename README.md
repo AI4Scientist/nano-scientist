@@ -97,6 +97,7 @@ outputs/
     ├── figures/           # generated plots / images
     ├── data/              # collected CSV / JSON data
     ├── scripts/           # executed code blocks
+    ├── traj.txt           # full stdout trace of the run
     ├── history.json       # step-by-step execution log
     ├── cost_log.json      # per-step token costs
     └── summary.json       # final run summary
@@ -139,26 +140,19 @@ Each skill is a folder under `skills/` with a `SKILL.md` that the agent reads at
 
 | Skill | What it produces |
 |---|---|
-| `research-lookup` | Web search summaries + citations via Perplexity Sonar |
-| `literature-review` | Thematic synthesis of prior work |
-| `hypothesis-generation` | Testable hypotheses grounded in the evidence |
-| `statistical-analysis` | Quantitative analysis with executable Python |
-| `data-visualization` | Matplotlib/seaborn figures saved to `figures/` |
-| `scientific-critical-thinking` | Assumption audits, alternative explanations |
-| `peer-review` | Structured critique of the emerging paper |
-| `citation-management` | BibTeX deduplication and gap-filling |
-| `github-mining` | Code / dataset search across GitHub |
-| `tooluniverse` | Hugging Face model and dataset discovery |
-| `generate-image` | AI-generated figures via image models |
-| `scientific-schematics` | Diagram generation for methods / pipelines |
-| `scientific-slides` | Slide deck outline |
-| `scientific-writing` | Prose drafting for individual sections |
-| `latex-posters` | Conference poster in LaTeX |
-| `pptx-posters` | Conference poster as PPTX |
-| `paper-2-web` | HTML landing page for the paper |
-| `venue-templates` | Journal / conference formatting templates |
-| `research-grants` | Grant proposal sections |
-| `scholar-evaluation` | Researcher profile and impact assessment |
+| `academic-slides` | Academic slide decks and conference talks: narrative arc, slide structure, visual hierarchy, .pptx generation |
+| `evo-memory` | Persistent research memory across cycles: Ideation Memory and Experimentation Memory via IDE/IVE/ESE evolution |
+| `experiment-craft` | Debugging and iteration on existing experiments: 5-step diagnostic flow, structured experiment logging |
+| `experiment-iterative-coder` | Iterative code refinement via plan→code→evaluate→refine cycles with lint/test scoring |
+| `experiment-pipeline` | Structured 4-stage experiment execution: baseline, hyperparameter tuning, proposed method, ablation study |
+| `nano-banana` | Professional presentation slides as images via Gemini image generation with browser review and PPTX packaging |
+| `paper-navigator` | Find and read academic papers: keyword search, citation traversal, arXiv monitoring, SOTA lookup |
+| `paper-planning` | Pre-writing paper planning: story design, experiment planning, figure design, 4-week timeline |
+| `paper-rebuttal` | Peer-review rebuttals: score diagnosis, comment prioritization, champion strategy, 18 tactical writing rules |
+| `paper-review` | Self-review before submission: 5-aspect checklist, adversarial stress-testing, figure/table quality checks |
+| `paper-writing` | Academic paper sections: 11-step workflow with LaTeX templates and section-by-section guidance |
+| `research-ideation` | End-to-end ideation: literature grounding, multi-persona generation, ELO ranking, proposal expansion |
+| `research-survey` | Structured literature survey reports: outline generation, draft, section expansion, final assembly |
 
 ### Adding a skill
 
@@ -190,9 +184,9 @@ That's it — the planner picks it up automatically on the next run. If `require
 | Variable | Required | Used for |
 |---|---|---|
 | `OPENROUTER_API_KEY` | **Required** | Core LLM inference (all nodes) |
-| `HF_TOKEN` | Skill-gated | `tooluniverse` (Hugging Face discovery) |
-| `GITHUB_TOKEN` | Skill-gated | `github-mining` (code/repo search) |
-| `OPENAI_API_KEY` | Skill-gated | `paper-2-web` (HTML/video/poster export) |
+| `HF_TOKEN` | Skill-gated | Skills that access Hugging Face Hub |
+| `GITHUB_TOKEN` | Skill-gated | Skills that query GitHub repos/issues |
+| `OPENAI_API_KEY` | Skill-gated | Skills that use OpenAI-compatible endpoints |
 
 Only `OPENROUTER_API_KEY` is strictly required. Skills whose required key is missing are automatically filtered out at startup — the agent runs with whatever skills are available. Copy `.env.example` to `.env` and set the keys you have.
 
@@ -206,6 +200,7 @@ Optional tuning variables (set in `.env` or shell):
 | `OUTPUT_TOKEN_COST_PER_MILLION` | — | Used to estimate LLM calls remaining |
 | `LOOKBACK` | `3` | History steps visible to each node |
 | `MAX_REVIEW_ROUNDS` | `1` | How many review/revision cycles to allow |
+| `MAX_TOOL_ROUNDS` | `16` | Max bash tool-calling iterations per skill step |
 
 ---
 
@@ -218,7 +213,7 @@ nano-scientist/
 │   ├── flow.py          # PocketFlow wiring (7 nodes)
 │   ├── nodes.py         # 7 agent nodes + module-level helpers
 │   └── utils.py         # LLM client, cost tracking, BibTeX utils
-├── skills/              # 20 modular research skills
+├── skills/              # 13 modular research skills
 │   ├── skills.json      # skill index (id + description)
 │   └── <skill-name>/
 │       └── SKILL.md     # instructions + optional YAML frontmatter
