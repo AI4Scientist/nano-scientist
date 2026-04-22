@@ -101,7 +101,11 @@ cp .env.example .env
 # edit .env (minimum: OPENROUTER_API_KEY)
 
 # 4) Run
+# Option A — pass a topic string directly
 python main.py "CRISPR off-target effects in primary T cells" --budget 1.00
+
+# Option B — pass a research proposal .md file
+python main.py proposal.md --budget 1.00
 ```
 
 Output lands in `outputs/<uuid>/`:
@@ -127,16 +131,31 @@ outputs/
 ## 🖥️ CLI reference
 
 ```text
-python main.py <topic> [options]
+python main.py [topic] [options]
 
 Arguments:
-  topic                 Research question (string or path to a .md file)
+  topic                 Research topic — either a plain string or a path to a
+                        .md file whose content is read as the topic.
+                        Optional when using --list-skills.
 
 Options:
   -b, --budget FLOAT    Spend limit in USD  (default: $5.00)
   -o, --output DIR      Output directory    (default: outputs/)
   -e, --env FILE        Path to .env file   (default: .env)
   --list-skills         Print available skills and exit
+```
+
+Examples:
+
+```bash
+# Topic as a string
+python main.py "CRISPR off-target effects in primary T cells" --budget 1.00
+
+# Topic from a research proposal file
+python main.py proposal.md --budget 1.00
+
+# List available skills
+python main.py --list-skills
 ```
 
 ### Budget tiers
