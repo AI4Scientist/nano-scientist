@@ -761,6 +761,32 @@ async def _assemble_tex_async(shared: dict):
     order = _section_order(shared)
 
     cleaned_bodies = {s: _sanitize_section_body(b) for s, b in shared.get("section_bodies", {}).items()}
+
+    # Inject workflow diagram into Introduction if the figure was generated
+    out_dir = Path(shared["output_path"])
+    workflow_fig = out_dir / "figures" / "workflow.png"
+    if workflow_fig.exists() and "introduction" in cleaned_bodies:
+        workflow_latex = (
+            "\n\n\\begin{figure}[htbp]\n"
+            "\\centering\n"
+            "\\includegraphics[width=\\textwidth]{figures/workflow.png}\n"
+            "\\caption{Overview of the study workflow. "
+            "The Research swim-lane (top, blue) shows the data collection and analysis steps; "
+            "the Writing swim-lane (bottom, green) shows the corresponding paper sections.}\n"
+            "\\label{fig:workflow}\n"
+            "\\end{figure}\n\n"
+        )
+        intro = cleaned_bodies["introduction"]
+        # Insert after the \section{Introduction} heading line
+        intro_lines = intro.split("\n")
+        insert_at = 0
+        for idx, ln in enumerate(intro_lines):
+            if re.match(r"\\section\{", ln, re.IGNORECASE):
+                insert_at = idx + 1
+                break
+        intro_lines.insert(insert_at, workflow_latex)
+        cleaned_bodies["introduction"] = "\n".join(intro_lines)
+
     body = "\n\n".join(cleaned_bodies.get(s, "")
                        for s in order if s in cleaned_bodies and s != "abstract")
     abstract = re.sub(r"\\section\{[Aa]bstract\}\s*", "",
@@ -782,7 +808,6 @@ async def _assemble_tex_async(shared: dict):
            .replace("%% ABSTRACT %%", abstract)
            .replace("%% BODY %%", body))
     bib = dedup_bibtex(shared.get("bibtex_entries", []))
-    out_dir = Path(shared["output_path"])
     (out_dir / "report.tex").write_text(tex, encoding="utf-8")
     (out_dir / "references.bib").write_text(bib, encoding="utf-8")
     shared["tex_content"] = tex
