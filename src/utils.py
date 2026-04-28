@@ -445,6 +445,8 @@ async def call_llm_async(
         else:
             raise
 
+    if not response or not response.choices:
+        raise RuntimeError(f"LLM returned empty response (no choices): {response!r}")
     choice = response.choices[0]
     text = choice.message.content or ""
     if not allow_tools:

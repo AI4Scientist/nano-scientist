@@ -407,11 +407,23 @@ async def _generate_workflow_diagram_async(shared: dict):
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     topic = shared.get("topic", "research")[:80]
-    lit_labels  = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
-    exp_labels  = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
-    write_labels = list(shared.get("section_bodies", {}).keys())[:5]
-    research_steps = (lit_labels + exp_labels) or ["Literature Survey", "Analysis"]
-    write_steps    = write_labels or ["Introduction", "Methods", "Results", "Conclusion"]
+
+    # Derive research steps from actual experiment/literature history labels
+    lit_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
+    exp_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
+    research_steps = (lit_labels + exp_labels) or ["Literature Survey", "Data Collection", "Analysis"]
+
+    # Derive writing steps from the actual written section titles (capitalised)
+    write_steps = [s.replace("_", " ").title()
+                   for s in _section_order(shared)
+                   if s in shared.get("section_bodies", {})][:8] or ["Introduction", "Methods", "Results", "Conclusion"]
+
+    # Build full draft text from all written sections for richer diagram content
+    order = _section_order(shared)
+    draft_text = "\n\n".join(
+        shared["section_bodies"][s][:800]
+        for s in order if s in shared.get("section_bodies", {})
+    )
 
     def _run():
         return subprocess.run(
@@ -419,7 +431,8 @@ async def _generate_workflow_diagram_async(shared: dict):
              "--output", str(dest),
              "--research-steps", json.dumps(research_steps),
              "--write-steps", json.dumps(write_steps),
-             "--topic", topic],
+             "--topic", topic,
+             "--draft", draft_text],
             capture_output=True, text=True, errors="replace",
             timeout=int(os.environ.get("LATEX_COMPILE_TIMEOUT", "60")),
             env={**os.environ},
@@ -530,11 +543,13 @@ async def _execute_skill(skill_name: str, stage: str, shared: dict):
     can_execute = "Bash" in meta.get("allowed-tools", [])
     abs_out = str(Path(shared["output_path"]).resolve())
 
+    hint = shared.get("_workflow_hint", "")
     prompt = (
         f"## Topic\n{shared['topic']}\n\n"
         f"## Skill: {skill_name}\n"
         f"## Skill instructions\n{skill_content[:SKILL_CONTENT_LIMIT]}\n\n"
-        f"## Working directory (ABSOLUTE): {abs_out}\n"
+        + (f"## SPECIFIC TASK (follow exactly)\n{hint}\n\n" if hint else "")
+        + f"## Working directory (ABSOLUTE): {abs_out}\n"
         f"## Already produced files (DO NOT recreate):\n{_existing_files(shared)}\n\n"
         "## Environment\n"
         "All API keys (OPENROUTER_API_KEY, PERPLEXITY_API_KEY, GITHUB_TOKEN, "
@@ -652,8 +667,21 @@ async def _run_loop(shared: dict, stage: str, stage_goal: str,
             print(f"[{stage}] Budget exhausted — exiting loop.")
             return "budget_exhausted"
 
-        # Decide next action
-        decision_text, _ = await _decide_next_action(shared, stage, stage_goal, skill_index)
+        # Decide next action — retry on transient LLM errors
+        _node_retries = int(os.environ.get("NODE_RETRIES", "2"))
+        _node_wait = int(os.environ.get("NODE_WAIT", "3"))
+        decision_text = None
+        for _attempt in range(max(1, _node_retries)):
+            try:
+                decision_text, _ = await _decide_next_action(shared, stage, stage_goal, skill_index)
+                break
+            except Exception as e:
+                print(f"[{stage}] _decide_next_action error (attempt {_attempt+1}): {e}")
+                if _attempt < _node_retries - 1:
+                    await asyncio.sleep(_node_wait)
+        if decision_text is None:
+            print(f"[{stage}] _decide_next_action failed after retries — exiting loop.")
+            return "error"
         decision = parse_yaml_response(decision_text)
 
         if not isinstance(decision, dict):
@@ -873,7 +901,6 @@ comments:
 
 
 async def _assemble_tex(shared: dict):
-    await _generate_workflow_diagram_async(shared)
     order = _section_order(shared)
     cleaned_bodies = {s: _sanitize_section_body(b) for s, b in shared.get("section_bodies", {}).items()}
 
@@ -1057,6 +1084,44 @@ class WritingLoop(AsyncNode):
                     # Force rewrite of the flagged section
                     shared.get("section_bodies", {}).pop(section, None)
                     await _write_section(section, shared)
+
+        # Generate workflow diagram via the study-workflow skill, informed by the full draft.
+        # Build args that generate.py needs and store them in shared so _execute_skill can use them.
+        if "study-workflow" in shared.get("skill_index", {}):
+            order = _section_order(shared)
+            lit_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
+            exp_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
+            draft_excerpt = "\n\n".join(
+                f"[{s.upper()}]\n{shared['section_bodies'][s][:500]}"
+                for s in order if s in shared.get("section_bodies", {})
+            )
+            generate_script = Path(__file__).resolve().parents[1] / "skills" / "study-workflow" / "scripts" / "generate.py"
+            abs_out = Path(shared["output_path"]).resolve()
+            research_steps_json = json.dumps(
+                (lit_labels + exp_labels) or ["Literature Survey", "Data Collection", "Analysis"]
+            )
+            write_steps_json = json.dumps([
+                s.replace("_", " ").title()
+                for s in order if s in shared.get("section_bodies", {})
+            ][:8] or ["Introduction", "Methods", "Results", "Conclusion"])
+            topic_str = shared.get("topic", "Research Workflow")[:80].replace('"', "'")
+            # Store a ready-to-run hint in shared so _execute_skill prompt picks it up via _existing_files / context
+            shared["_workflow_hint"] = (
+                f"TASK: Run study-workflow/scripts/generate.py to create figures/workflow.png.\n"
+                f"Use this exact command (write the draft excerpt to a temp file to avoid shell quoting issues):\n\n"
+                f"python {generate_script} \\\n"
+                f"  --output {abs_out}/figures/workflow.png \\\n"
+                f"  --research-steps '{research_steps_json}' \\\n"
+                f"  --write-steps '{write_steps_json}' \\\n"
+                f"  --topic \"{topic_str}\" \\\n"
+                f"  --draft \"$(cat /tmp/workflow_draft.txt)\"\n\n"
+                f"Write the draft excerpt first:\n"
+                f"cat > /tmp/workflow_draft.txt << 'DRAFTEOF'\n{draft_excerpt[:2000]}\nDRAFTEOF\n"
+            )
+            await _execute_skill("study-workflow", "writing", shared)
+            shared.pop("_workflow_hint", None)
+        else:
+            await _generate_workflow_diagram_async(shared)
 
         # Final tex assembly with title
         await _assemble_tex(shared)
