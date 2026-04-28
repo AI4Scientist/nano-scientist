@@ -468,6 +468,34 @@ python scripts/dataset_search.py --query "sentiment analysis" --limit 10
 
 ---
 
+## Mandatory BibTeX Output (REQUIRED for every paper collection task)
+
+After collecting and filtering papers, you MUST emit a `%%BEGIN BIBTEX%%` block containing one entry per collected paper. Build each entry **strictly from the real metadata returned by the API** (S2, arXiv, DOI) — do NOT invent or guess any field values. Use the following template:
+
+```
+%%BEGIN BIBTEX%%
+@article{AuthorYYYY,
+  author    = {Last, First and Last2, First2},
+  title     = {Exact paper title from API},
+  year      = {YYYY},
+  journal   = {Venue name from API},
+  doi       = {doi string if available},
+  url       = {https://arxiv.org/abs/XXXX.XXXXX or canonical URL},
+}
+%%END BIBTEX%%
+```
+
+Rules:
+- Use `@article` for journal papers, `@inproceedings` for conference papers, `@misc` for preprints.
+- Cite key format: `FirstAuthorLastNameYYYY` (e.g., `Vaswani2017`). Append `a/b/c` on collision.
+- Populate only fields available from the API response; leave out fields with no data rather than guessing.
+- If `S2_API_KEY` is unavailable and only arXiv metadata is available, use `@misc` with `eprint` and `archivePrefix = {arXiv}`.
+- One `%%BEGIN BIBTEX%% ... %%END BIBTEX%%` block for the entire collection (not one per paper).
+
+This output is consumed by the pipeline to populate `references.bib`. Skipping it forces the writing stage to hallucinate citations.
+
+---
+
 ## After Collecting Papers: Next Steps
 
 | Goal | Hand off to |

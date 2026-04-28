@@ -14,6 +14,9 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -30,6 +33,54 @@ from .utils import (
     track_cost,
     estimate_calls_remaining,
 )
+
+# ---------------------------------------------------------------------------
+# CrossRef citation lookup (free, no token required)
+# ---------------------------------------------------------------------------
+def _crossref_lookup(cite_key: str) -> str | None:
+    """Try to fetch a real BibTeX entry from CrossRef for a given cite key.
+
+    The key is used as a title query. Returns a BibTeX string on success,
+    None if nothing useful is found. Fails silently — never raises.
+    """
+    query = urllib.parse.quote(cite_key.replace("-", " ").replace("_", " "))
+    url = f"https://api.crossref.org/works?query={query}&rows=1&select=DOI,title,author,published,container-title,type"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "nanoscientist/1.0 (mailto:research@example.com)"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        items = data.get("message", {}).get("items", [])
+        if not items:
+            return None
+        item = items[0]
+        doi = item.get("DOI", "")
+        titles = item.get("title", [])
+        title = titles[0] if titles else ""
+        if not title:
+            return None
+        authors_raw = item.get("author", [])
+        author_str = " and ".join(
+            f"{a.get('family', '')}, {a.get('given', '')}" for a in authors_raw if a.get("family")
+        ) or "Unknown"
+        date_parts = item.get("published", {}).get("date-parts", [[]])
+        year = str(date_parts[0][0]) if date_parts and date_parts[0] else ""
+        venue = (item.get("container-title") or [""])[0]
+        entry_type = "inproceedings" if "proceedings" in item.get("type", "") else "article"
+        venue_field = "booktitle" if entry_type == "inproceedings" else "journal"
+        bib = (
+            f"@{entry_type}{{{cite_key},\n"
+            f"  author  = {{{author_str}}},\n"
+            f"  title   = {{{title}}},\n"
+            f"  year    = {{{year}}},\n"
+            f"  {venue_field} = {{{venue}}},\n"
+        )
+        if doi:
+            bib += f"  doi     = {{{doi}}},\n"
+        bib += "}"
+        return bib
+    except Exception:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -210,7 +261,40 @@ def _data_summary(shared: dict) -> str:
     return "\n".join(lines) if found_any else ""
 
 
-def _extend_bibtex(shared: dict, new_entries: list[str]):
+def _verify_bibtex_entry(entry: str) -> bool:
+    """Check that a BibTeX entry corresponds to a real paper via CrossRef title search.
+
+    Returns True if CrossRef confirms the title exists (≥60% word overlap),
+    or if the entry already contains a DOI (trusted), or if CrossRef is unreachable.
+    Returns False only when CrossRef is reachable and returns a clearly different title.
+    """
+    if re.search(r'\bdoi\s*=\s*\{[^}]+\}', entry, re.IGNORECASE):
+        return True  # DOI present — trust it
+    title_m = re.search(r'\btitle\s*=\s*\{([^}]+)\}', entry, re.IGNORECASE)
+    if not title_m:
+        return True  # can't check without title — let it through
+    title = title_m.group(1).strip()
+    query = urllib.parse.quote(title)
+    url = f"https://api.crossref.org/works?query.title={query}&rows=1&select=title"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "nanoscientist/1.0 (mailto:research@example.com)"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        items = data.get("message", {}).get("items", [])
+        if not items:
+            return False
+        cr_title = (items[0].get("title") or [""])[0].lower()
+        entry_words = set(re.findall(r'\w+', title.lower()))
+        cr_words = set(re.findall(r'\w+', cr_title))
+        if not entry_words:
+            return True
+        overlap = len(entry_words & cr_words) / len(entry_words)
+        return overlap >= 0.6
+    except Exception:
+        return True  # network failure — don't block real entries
+
+
+def _extend_bibtex(shared: dict, new_entries: list[str], skip_verify: bool = False):
     existing_keys = set()
     for e in shared.get("bibtex_entries", []):
         m = re.match(r"@\w+\{([^,]+),", e)
@@ -218,9 +302,16 @@ def _extend_bibtex(shared: dict, new_entries: list[str]):
             existing_keys.add(m.group(1).strip())
     for entry in new_entries:
         m = re.match(r"@\w+\{([^,]+),", entry)
-        if m and m.group(1).strip() not in existing_keys:
-            shared.setdefault("bibtex_entries", []).append(entry)
-            existing_keys.add(m.group(1).strip())
+        if not m:
+            continue
+        key = m.group(1).strip()
+        if key in existing_keys:
+            continue
+        if not skip_verify and not _verify_bibtex_entry(entry):
+            print(f"[BibTeX] Dropped unverified entry: {key}")
+            continue
+        shared.setdefault("bibtex_entries", []).append(entry)
+        existing_keys.add(key)
 
 
 def _sanitize_section_body(body: str) -> str:
@@ -646,12 +737,13 @@ async def _write_section(section: str, shared: dict):
 ## Artifacts
 {artifact_text}{prior_text}{figures_block}{data_block}
 
-## BibTeX keys: {", ".join(cite_keys) or "No citations yet."}
+## BibTeX keys available (use ONLY these — do NOT invent new keys or emit any BibTeX):
+{", ".join(cite_keys) or "No citations available — omit all \\cite{} commands."}
 
 ## LaTeX rules
 - Output ONLY this section's LaTeX (\\section{{...}} onward). No preamble, no \\documentclass.
-- Use \\cite{{key}} only from the BibTeX keys listed above.
-- Do NOT include \\bibliography or \\bibliographystyle.
+- Use \\cite{{key}} ONLY from the exact keys listed above. Never fabricate a key not in that list.
+- Do NOT emit any %%BEGIN BIBTEX%% block. Do NOT include \\bibliography or \\bibliographystyle.
 - Escape \\%, \\&, \\#, \\$, \\_ in text mode.
 - Underscored identifiers must appear in \\texttt{{}} or math mode.
 - Unicode symbols (≥, —) MUST be replaced: $\\geq$, --- or \\textemdash{{}}.
@@ -682,11 +774,7 @@ async def _write_section(section: str, shared: dict):
 %%BEGIN SECTION%%
 \\section{{{section.title()}}}
 ...
-%%END SECTION%%
-
-%%BEGIN BIBTEX%%
-@article{{key, ...}}
-%%END BIBTEX%%""",
+%%END SECTION%%""",
         system=_WRITE_SYSTEM,
         budget_remaining=shared.get("budget_remaining", 0),
         cost_log=shared.get("cost_log"),
@@ -700,10 +788,6 @@ async def _write_section(section: str, shared: dict):
         print(f"[WritingLoop] '{section}': ran {len(code_outputs)} code block(s)")
 
     body = _sanitize_section_body(raw_section)
-    bib_m = re.search(r"%%BEGIN BIBTEX%%(.*?)%%END BIBTEX%%", text, re.DOTALL)
-    if bib_m:
-        new_entries = [e.strip() for e in re.findall(r"(@\w+\{[^@]+)", bib_m.group(1), re.DOTALL) if e.strip()]
-        _extend_bibtex(shared, new_entries)
 
     if len(body.strip()) < MIN_SECTION_LENGTH:
         print(f"[WritingLoop] '{section}' too short — retrying.")
@@ -711,7 +795,7 @@ async def _write_section(section: str, shared: dict):
             f"IMPORTANT: output the {section} section content between the markers.\n\n"
             f"## Topic: {shared['topic']}\n"
             f"## Artifacts\n{artifact_text[:ARTIFACT_CONTEXT_CHARS]}\n"
-            f"## BibTeX keys: {', '.join(cite_keys) or 'None'}\n\n"
+            f"## BibTeX keys (use ONLY these, do not invent new ones): {', '.join(cite_keys) or 'None'}\n\n"
             f"%%BEGIN SECTION%%\n\\section{{{section.title()}}}\n...content...\n%%END SECTION%%",
             system=_WRITE_SYSTEM,
             budget_remaining=shared.get("budget_remaining", 0),
@@ -1048,22 +1132,45 @@ class CompileTeX(Node):
 class FixTeX(AsyncNode):
     async def prep_async(self, shared):
         undefined = shared.get("undefined_citations", [])
+        # Attempt CrossRef lookup for undefined citations before falling back to LLM.
+        still_missing = []
+        if undefined:
+            out_dir = Path(shared["output_path"])
+            crossref_resolved = []
+            for key in undefined:
+                entry = _crossref_lookup(key)
+                if entry:
+                    crossref_resolved.append(entry)
+                    print(f"[FixTeX] CrossRef resolved: {key}")
+                else:
+                    still_missing.append(key)
+            if crossref_resolved:
+                _extend_bibtex(shared, crossref_resolved, skip_verify=True)
+                combined = dedup_bibtex(shared.get("bibtex_entries", []))
+                (out_dir / "references.bib").write_text(combined, encoding="utf-8")
+                shared.update({"bib_content": combined})
+                print(f"[FixTeX] CrossRef added {len(crossref_resolved)} entries; {len(still_missing)} still missing")
+
         return {
             "tex_content":        shared["tex_content"],
             "bib_content":        shared.get("bib_content", ""),
             "errors":             shared.get("compile_errors", ""),
             "attempt":            shared.get("fix_attempts", 0),
-            "undefined_citations": undefined,
-            "mode":               "citation" if undefined else "latex_error",
+            "undefined_citations": still_missing,
+            "mode":               "citation" if still_missing else ("latex_error" if not undefined else None),
             "budget_remaining":   shared.get("budget_remaining", 0),
         }
 
     async def exec_async(self, prep_res):
         if prep_res["attempt"] >= 2:
             return None, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
+        if prep_res["mode"] is None:
+            # All undefined citations were resolved by CrossRef — nothing for LLM to do.
+            return None, {"input_tokens": 0, "output_tokens": 0, "cost": 0}
         if prep_res["mode"] == "citation":
             prompt = (
-                f"Generate BibTeX entries for these undefined citation keys:\n"
+                f"Generate BibTeX entries for these undefined citation keys "
+                f"(CrossRef found nothing for them — only include papers you are certain exist):\n"
                 f"{', '.join(prep_res['undefined_citations'])}\n\n"
                 f"Current .bib (do NOT repeat existing entries):\n{prep_res['bib_content'][:3000]}\n\n"
                 "Return ONLY new BibTeX entries. Each MUST have: author, title, year, journal/booktitle."
@@ -1082,6 +1189,10 @@ class FixTeX(AsyncNode):
         text, usage = exec_res
         shared["fix_attempts"] = prep_res["attempt"] + 1
         if text is None:
+            if prep_res["mode"] is None:
+                # All citations resolved by CrossRef — recompile with updated .bib.
+                shared.pop("undefined_citations", None)
+                return "compile"
             print("[FixTeX] Max attempts reached.")
             return "done"
         track_cost(shared, f"fix_tex:{shared['fix_attempts']}", usage)
