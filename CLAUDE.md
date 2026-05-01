@@ -40,7 +40,7 @@ Each loop runs `_run_loop`: each iteration the LLM decides `action: skill|done`,
 | `skills/skills.json` | Skill index (id + description) |
 
 ## Shared store keys
-`topic`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `history`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `fix_attempts`, `paper_title`, `figures_used`, `api_keys`
+`topic`, `research_goal`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `history`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `fix_attempts`, `paper_title`, `figures_used`, `api_keys`
 
 `history` entries: `{"step": int, "stage": "literature"|"experiment"|"writing"|"writing_revision", "label": str, "summary": str, "cost": float, "error": str|null}`
 

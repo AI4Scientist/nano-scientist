@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/Core_Files-4-111827?style=for-the-badge" alt="Core files" />
   <img src="https://img.shields.io/badge/Nodes-7-2563eb?style=for-the-badge" alt="Nodes" />
   <img src="https://img.shields.io/badge/Loops-4-dc2626?style=for-the-badge" alt="Loops" />
-  <img src="https://img.shields.io/badge/Skills-13-059669?style=for-the-badge" alt="Skills" />
+  <img src="https://img.shields.io/badge/Skills-12-059669?style=for-the-badge" alt="Skills" />
   <img src="https://img.shields.io/badge/Budget_Driven-Yes-7c3aed?style=for-the-badge" alt="Budget driven" />
 </p>
 
@@ -180,18 +180,17 @@ Skills with `allowed-tools: Bash` get a real tool-calling loop with bash executi
 
 | Skill | What it produces |
 |---|---|
-| `academic-slides` | Academic slide decks and conference talks: narrative arc, slide structure, visual hierarchy, .pptx generation |
 | `evo-memory` | Persistent research memory across cycles: Ideation Memory and Experimentation Memory via IDE/IVE/ESE evolution |
+| `paper-navigator` | Find and read academic papers: keyword search, citation traversal, arXiv monitoring, SOTA lookup |
+| `research-survey` | Structured literature survey reports: outline generation, draft, section expansion, final assembly |
+| `research-ideation` | End-to-end ideation: literature grounding, multi-persona generation, ELO ranking, proposal expansion |
+| `paper-planning` | Pre-writing paper planning: story design, experiment planning, figure design, 4-week timeline |
+| `experiment-pipeline` | Structured 4-stage experiment execution: baseline, hyperparameter tuning, proposed method, ablation study |
 | `experiment-craft` | Debugging and iteration on existing experiments: 5-step diagnostic flow, structured experiment logging |
 | `experiment-iterative-coder` | Iterative code refinement via plan→code→evaluate→refine cycles with lint/test scoring |
-| `experiment-pipeline` | Structured 4-stage experiment execution: baseline, hyperparameter tuning, proposed method, ablation study |
-| `paper-navigator` | Find and read academic papers: keyword search, citation traversal, arXiv monitoring, SOTA lookup |
-| `paper-planning` | Pre-writing paper planning: story design, experiment planning, figure design, 4-week timeline |
-| `paper-rebuttal` | Peer-review rebuttals: score diagnosis, comment prioritization, champion strategy, 18 tactical writing rules |
-| `paper-review` | Self-review before submission: 5-aspect checklist, adversarial stress-testing, figure/table quality checks |
 | `paper-writing` | Academic paper sections: 11-step workflow with LaTeX templates and section-by-section guidance |
-| `research-ideation` | End-to-end ideation: literature grounding, multi-persona generation, ELO ranking, proposal expansion |
-| `research-survey` | Structured literature survey reports: outline generation, draft, section expansion, final assembly |
+| `paper-review` | Self-review before submission: 5-aspect checklist, adversarial stress-testing, figure/table quality checks |
+| `paper-rebuttal` | Peer-review rebuttals: score diagnosis, comment prioritization, champion strategy, 18 tactical writing rules |
 | `study-workflow` | Publication-quality research workflow diagram (Research + Writing swim-lanes) as a PNG via gpt-5.4-image-2 |
 
 ### Add a skill
