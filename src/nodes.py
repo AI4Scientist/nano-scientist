@@ -461,6 +461,7 @@ def _build_context(shared: dict, stage_goal: str, skill_index: dict) -> str:
     )
     skills_block = format_skill_index(skill_index) if skill_index else "None available."
     return (
+        f"## Research goal (DO NOT DEVIATE from this)\n{shared.get('research_goal', shared['topic'])}\n\n"
         f"## Stage goal\n{stage_goal}\n\n"
         f"## Topic\n{shared['topic']}\n\n"
         f"## Budget remaining\n${shared.get('budget_remaining', 0):.4f} "
@@ -545,6 +546,7 @@ async def _execute_skill(skill_name: str, stage: str, shared: dict):
 
     hint = shared.get("_workflow_hint", "")
     prompt = (
+        f"## Research goal (DO NOT DEVIATE from this)\n{shared.get('research_goal', shared['topic'])}\n\n"
         f"## Topic\n{shared['topic']}\n\n"
         f"## Skill: {skill_name}\n"
         f"## Skill instructions\n{skill_content[:SKILL_CONTENT_LIMIT]}\n\n"
@@ -615,6 +617,7 @@ async def _quality_gate(shared: dict, stage: str, stage_goal: str) -> tuple[bool
     Returns (accepted, feedback_text).
     """
     prompt = (
+        f"## Research goal (DO NOT DEVIATE from this)\n{shared.get('research_goal', shared['topic'])}\n\n"
         f"## Stage goal\n{stage_goal}\n\n"
         f"## Topic\n{shared['topic']}\n\n"
         f"## Artifacts collected\n{_artifact_index(shared)}\n\n"
@@ -975,6 +978,7 @@ class Initializer(Node):
         shared.update({
             "output_path": str(out_dir),
             "budget_remaining": shared["budget_dollars"],
+            "research_goal": f"Advance understanding of: {shared['topic']}",
             "artifacts": {}, "bibtex_entries": [], "history": [],
             "sections_written": [], "section_bodies": {},
             "fix_attempts": 0, "cost_log": [],

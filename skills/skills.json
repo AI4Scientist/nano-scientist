@@ -1,12 +1,28 @@
 {
   "skills": [
     {
-      "id": "academic-slides",
-      "description": "Create or refine academic slide decks and conference talks: narrative arc, slide structure, visual hierarchy, .pptx generation, rehearsal, and Q&A preparation."
-    },
-    {
       "id": "evo-memory",
       "description": "Manage persistent research memory across cycles: update Ideation Memory (M_I) and Experimentation Memory (M_E) via IDE/IVE/ESE evolution mechanisms."
+    },
+    {
+      "id": "paper-navigator",
+      "description": "Find and read academic papers: keyword search, citation traversal, arXiv monitoring, trending detection, GitHub search, SOTA lookup, and structured reading notes."
+    },
+    {
+      "id": "research-survey",
+      "description": "Generate structured literature survey reports from collected papers: outline generation, draft, section expansion, summary refinement, and final assembly."
+    },
+    {
+      "id": "research-ideation",
+      "description": "End-to-end research ideation: literature grounding, multi-persona idea generation, ELO tournament ranking, evo-memory update, and manuscript-quality proposal expansion."
+    },
+    {
+      "id": "paper-planning",
+      "description": "Pre-writing paper planning: story design (task→challenge→insight→contribution), experiment planning, figure design, 4-week timeline, and mock rejection letter."
+    },
+    {
+      "id": "experiment-pipeline",
+      "description": "Structured 4-stage experiment execution: baseline reproduction, hyperparameter tuning, proposed method validation, ablation study. Integrates with evo-memory and experiment-craft."
     },
     {
       "id": "experiment-craft",
@@ -17,36 +33,16 @@
       "description": "Iterative code refinement via plan→code→evaluate→refine cycles with lint/test scoring. Use for high-quality code generation requiring 3–10 iterations."
     },
     {
-      "id": "experiment-pipeline",
-      "description": "Structured 4-stage experiment execution: baseline reproduction, hyperparameter tuning, proposed method validation, ablation study. Integrates with evo-memory and experiment-craft."
-    },
-    {
-      "id": "paper-navigator",
-      "description": "Find and read academic papers: keyword search, citation traversal, arXiv monitoring, trending detection, GitHub search, SOTA lookup, and structured reading notes."
-    },
-    {
-      "id": "paper-planning",
-      "description": "Pre-writing paper planning: story design (task→challenge→insight→contribution), experiment planning, figure design, 4-week timeline, and mock rejection letter."
-    },
-    {
-      "id": "paper-rebuttal",
-      "description": "Write effective peer-review rebuttals: score diagnosis, color-coded comment prioritization, champion strategy, and 18 tactical writing rules."
+      "id": "paper-writing",
+      "description": "Write academic paper sections using an 11-step workflow with LaTeX templates, counterintuitive writing tactics, and section-by-section guidance."
     },
     {
       "id": "paper-review",
       "description": "Self-review a paper draft before submission: 5-aspect checklist, adversarial stress-testing, reverse-outlining, figure/table quality checks, and prebuttal drafting."
     },
     {
-      "id": "paper-writing",
-      "description": "Write academic paper sections using an 11-step workflow with LaTeX templates, counterintuitive writing tactics, and section-by-section guidance."
-    },
-    {
-      "id": "research-ideation",
-      "description": "End-to-end research ideation: literature grounding, multi-persona idea generation, ELO tournament ranking, evo-memory update, and manuscript-quality proposal expansion."
-    },
-    {
-      "id": "research-survey",
-      "description": "Generate structured literature survey reports from collected papers: outline generation, draft, section expansion, summary refinement, and final assembly."
+      "id": "paper-rebuttal",
+      "description": "Write effective peer-review rebuttals: score diagnosis, color-coded comment prioritization, champion strategy, and 18 tactical writing rules."
     },
     {
       "id": "study-workflow",
