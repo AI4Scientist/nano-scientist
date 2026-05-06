@@ -5,12 +5,8 @@ Expected frontmatter format:
 ---
 name: <skill-id>
 description: <one-line description>
-allowed-tools: Bash          # or omit for plain LLM; "Bash" grants tool-calling loop
+allowed-tools: Bash          # optional; "Bash" grants tool-calling loop
 required-keys: [KEY1, KEY2]  # optional; skill filtered out if any key missing
-metadata:
-  author: <author>
-  version: '<semver>'
-  tags: [tag1, tag2]
 ---
 """
 
@@ -20,8 +16,7 @@ from pathlib import Path
 
 import yaml
 
-REQUIRED_FIELDS = ["name", "description", "metadata"]
-REQUIRED_METADATA = ["author", "version", "tags"]
+REQUIRED_FIELDS = ["name", "description"]
 
 # allowed-tools values that grant bash execution in nano-scientist
 BASH_TOOL_VALUES = {"Bash", "bash"}
@@ -110,24 +105,6 @@ def validate_skill(filepath: str) -> list[str]:
             keys = [k.strip() for k in keys.split(",") if k.strip()]
         if not isinstance(keys, list):
             errors.append(f"{skill_name}: 'required-keys' must be a list of strings")
-
-    # --- metadata sub-fields ---
-    meta = data.get("metadata", {})
-    if isinstance(meta, dict):
-        for field in REQUIRED_METADATA:
-            if field not in meta:
-                errors.append(f"{skill_name}: Missing metadata field '{field}'")
-        # version should be a quoted string
-        if "version" in meta and not isinstance(meta["version"], str):
-            errors.append(
-                f"{skill_name}: metadata.version should be a quoted string (e.g. '1.0.0')"
-            )
-        # tags should be a non-empty list
-        if "tags" in meta:
-            if not isinstance(meta["tags"], list) or not meta["tags"]:
-                errors.append(f"{skill_name}: metadata.tags must be a non-empty list")
-    elif "metadata" in data:
-        errors.append(f"{skill_name}: 'metadata' must be a mapping")
 
     return errors + [f"[WARN] {w}" for w in warnings]
 

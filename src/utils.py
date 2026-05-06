@@ -6,7 +6,7 @@ import os
 import re
 import yaml
 from pathlib import Path
-from openai import OpenAI, AsyncOpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 try:
@@ -14,6 +14,18 @@ try:
     _TIKTOKEN_AVAILABLE = True
 except ImportError:
     _TIKTOKEN_AVAILABLE = False
+
+
+_MODEL: str
+_IN_COST: float
+_OUT_COST: float
+_BASE_URL: str
+_EST_AVG_PROMPT_TOKENS: int
+_EST_AVG_OUTPUT_TOKENS: int
+_TOOL_DEFAULT_TIMEOUT: int
+_TOOL_MAX_TIMEOUT: int
+_TOOL_STDOUT_LIMIT: int
+_TOOL_STDERR_LIMIT: int
 
 
 def init_env(env_path: str = None):
@@ -27,6 +39,18 @@ def init_env(env_path: str = None):
     if not path.exists():
         raise FileNotFoundError(f".env file not found: {path}")
     load_dotenv(path, override=True)
+    global _MODEL, _IN_COST, _OUT_COST, _BASE_URL, _EST_AVG_PROMPT_TOKENS, _EST_AVG_OUTPUT_TOKENS
+    global _TOOL_DEFAULT_TIMEOUT, _TOOL_MAX_TIMEOUT, _TOOL_STDOUT_LIMIT, _TOOL_STDERR_LIMIT
+    _MODEL                 = os.environ.get("MODEL_NAME", "z-ai/glm-5")
+    _IN_COST               = float(os.environ.get("INPUT_TOKEN_COST_PER_MILLION", "0.95"))
+    _OUT_COST              = float(os.environ.get("OUTPUT_TOKEN_COST_PER_MILLION", "2.55"))
+    _BASE_URL              = os.environ.get("INFERENCE_BASE_URL", "https://openrouter.ai/api/v1")
+    _EST_AVG_PROMPT_TOKENS = int(os.environ.get("EST_AVG_PROMPT_TOKENS", "500"))
+    _EST_AVG_OUTPUT_TOKENS = int(os.environ.get("EST_AVG_OUTPUT_TOKENS", "300"))
+    _TOOL_DEFAULT_TIMEOUT  = int(os.environ.get("TOOL_DEFAULT_TIMEOUT", "60"))
+    _TOOL_MAX_TIMEOUT      = int(os.environ.get("TOOL_MAX_TIMEOUT",     "300"))
+    _TOOL_STDOUT_LIMIT     = int(os.environ.get("TOOL_STDOUT_LIMIT",    "4000"))
+    _TOOL_STDERR_LIMIT     = int(os.environ.get("TOOL_STDERR_LIMIT",    "1000"))
 
 
 # --- API Key Registry ---
@@ -60,19 +84,6 @@ def format_available_keys(keys: dict[str, bool]) -> str:
         lines.append(f"- {key}: {status} — {desc}")
     return "\n".join(lines)
 
-# --- LLM Configuration (read from env, fall back to defaults) ---
-def _get_model() -> str:
-    return os.environ.get("MODEL_NAME", "z-ai/glm-5")
-
-def _get_input_cost() -> float:
-    return float(os.environ.get("INPUT_TOKEN_COST_PER_MILLION", "0.95"))
-
-def _get_output_cost() -> float:
-    return float(os.environ.get("OUTPUT_TOKEN_COST_PER_MILLION", "2.55"))
-
-def _get_base_url() -> str:
-    return os.environ.get("INFERENCE_BASE_URL", "https://openrouter.ai/api/v1")
-
 
 # --- Token counting ---
 _tiktoken_enc = None
@@ -89,10 +100,6 @@ def count_tokens(text: str) -> int:
         return len(_tiktoken_enc.encode(text))
     # Fallback: ~1.3 tokens per word (rough estimate)
     return int(len(text.split()) * 1.3)
-
-
-_EST_AVG_PROMPT_TOKENS  = int(os.environ.get("EST_AVG_PROMPT_TOKENS",  "500"))
-_EST_AVG_OUTPUT_TOKENS  = int(os.environ.get("EST_AVG_OUTPUT_TOKENS",  "300"))
 
 
 def estimate_calls_remaining(
@@ -116,8 +123,8 @@ def estimate_calls_remaining(
             avg_prompt_tokens = int(sum(e["input_tokens"] for e in real_calls) / len(real_calls))
             avg_output_tokens = int(sum(e["output_tokens"] for e in real_calls) / len(real_calls))
     cost_per_call = (
-        avg_prompt_tokens * _get_input_cost() / 1_000_000
-        + avg_output_tokens * _get_output_cost() / 1_000_000
+        avg_prompt_tokens * _IN_COST / 1_000_000
+        + avg_output_tokens * _OUT_COST / 1_000_000
     )
     if cost_per_call <= 0:
         return 0
@@ -136,105 +143,6 @@ _SYSTEM_PROMPT_TEMPLATE = (
 )
 
 
-def get_client() -> OpenAI:
-    """Create OpenAI-compatible client from env config."""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "OPENROUTER_API_KEY not found.\n"
-            "Add to your .env file:\n"
-            "  OPENROUTER_API_KEY=sk-or-v1-your-key-here\n"
-            "Get one at https://openrouter.ai/keys"
-        )
-    return OpenAI(
-        base_url=_get_base_url(),
-        api_key=api_key,
-    )
-
-
-def call_llm(
-    prompt: str,
-    system: str = None,
-    budget_remaining: float = None,
-    allow_tools: bool = False,
-    cost_log: list = None,
-) -> tuple[str, dict]:
-    """Call the LLM and return (response_text, usage_dict).
-
-    Injects a budget-aware system prompt. If `system` is provided it is
-    appended after the injected preamble so callers can still pass node-
-    specific instructions.
-
-    allow_tools: set True only for skill execution steps where the model
-    may legitimately invoke tools (e.g. Bash, web search). All planning,
-    writing, and review calls must leave this False so tool-calling models
-    respond with plain text instead of tool invocations.
-
-    usage_dict keys: input_tokens, output_tokens, cost, estimated_input_tokens
-    """
-    # Build system message with budget context
-    calls_left = estimate_calls_remaining(budget_remaining or 0, cost_log=cost_log)
-    budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(calls=calls_left)
-    full_system = budget_ctx
-    if system:
-        full_system = budget_ctx + "\n\n" + system
-
-    # Estimate tokens before API call (for logging/debugging)
-    est_input = count_tokens(full_system) + count_tokens(prompt)
-
-    client = get_client()
-    messages = [
-        {"role": "system", "content": full_system},
-        {"role": "user", "content": prompt},
-    ]
-
-    kwargs = {"model": _get_model(), "messages": messages}
-    if not allow_tools:
-        kwargs["tool_choice"] = "none"
-
-    try:
-        response = client.chat.completions.create(**kwargs)
-    except Exception as e:
-        # Some backends reject tool_choice="none" when no tools are defined.
-        if not allow_tools and ("tool_choice" in str(e).lower() or getattr(getattr(e, "response", None), "status_code", None) == 400):
-            response = client.chat.completions.create(model=_get_model(), messages=messages)
-        else:
-            raise
-
-    choice = response.choices[0]
-    text = choice.message.content or ""
-    if not allow_tools:
-        # Planning/writing calls must not contain tool invocations — strip any that leaked.
-        if not text and choice.message.tool_calls:
-            # Model ignored tool_choice; salvage argument blobs as raw text.
-            text = "\n".join(
-                tc.function.arguments for tc in choice.message.tool_calls
-                if tc.function and tc.function.arguments
-            )
-        # Strip XML-style tool-call tags some models bleed into content (e.g. minimax).
-        text = re.sub(r"<[a-zA-Z0-9_:]+:tool_call>.*?</[a-zA-Z0-9_:]+:tool_call>", "", text, flags=re.DOTALL)
-        text = re.sub(r"</?[a-zA-Z0-9_:]+:tool_call[^>]*>", "", text)
-    usage = response.usage
-    input_tokens = usage.prompt_tokens if usage else est_input
-    output_tokens = usage.completion_tokens if usage else count_tokens(text)
-    cost = (
-        input_tokens * _get_input_cost() / 1_000_000
-        + output_tokens * _get_output_cost() / 1_000_000
-    )
-
-    return text, {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cost": cost,
-        "estimated_input_tokens": est_input,
-    }
-
-
-_TOOL_DEFAULT_TIMEOUT = int(os.environ.get("TOOL_DEFAULT_TIMEOUT", "60"))
-_TOOL_MAX_TIMEOUT     = int(os.environ.get("TOOL_MAX_TIMEOUT",     "300"))
-_TOOL_STDOUT_LIMIT    = int(os.environ.get("TOOL_STDOUT_LIMIT",    "4000"))
-_TOOL_STDERR_LIMIT    = int(os.environ.get("TOOL_STDERR_LIMIT",    "1000"))
-
 # Tool definition exposed to the model for Bash execution
 _BASH_TOOL = {
     "type": "function",
@@ -250,8 +158,8 @@ _BASH_TOOL = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": f"Timeout in seconds (default {_TOOL_DEFAULT_TIMEOUT}, max {_TOOL_MAX_TIMEOUT}).",
-                    "default": _TOOL_DEFAULT_TIMEOUT,
+                    "description": "Timeout in seconds (default 300).",
+                    "default": 300,
                 },
             },
             "required": ["command"],
@@ -290,115 +198,6 @@ def _execute_tool_call(tool_name: str, arguments: dict, cwd: str) -> str:
     return f"[ERROR] Unknown tool: {tool_name}"
 
 
-def call_llm_with_tools(
-    prompt: str,
-    system: str = None,
-    budget_remaining: float = None,
-    cwd: str = ".",
-    max_tool_rounds: int = None,
-    cost_log: list = None,
-) -> tuple[str, dict]:
-    """Call the LLM with Bash tool access and feed execution results back until done.
-
-    The model may call the bash tool repeatedly. Each result is appended to the
-    conversation so the model can react to errors and retry. The loop ends when
-    the model stops calling tools or max_tool_rounds is reached.
-
-    Returns (final_text, aggregated_usage_dict).
-    """
-    if max_tool_rounds is None:
-        max_tool_rounds = int(os.environ.get("MAX_TOOL_ROUNDS", "16"))
-    calls_left = estimate_calls_remaining(budget_remaining or 0, cost_log=cost_log)
-    budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(calls=calls_left)
-    full_system = budget_ctx
-    if system:
-        full_system = budget_ctx + "\n\n" + system
-
-    client = get_client()
-    messages = [
-        {"role": "system", "content": full_system},
-        {"role": "user", "content": prompt},
-    ]
-
-    total_input = count_tokens(full_system) + count_tokens(prompt)
-    total_output = 0
-    total_cost = 0.0
-    final_text = ""
-
-    for round_i in range(max_tool_rounds):
-        try:
-            response = client.chat.completions.create(
-                model=_get_model(),
-                messages=messages,
-                tools=[_BASH_TOOL],
-                tool_choice="auto",
-            )
-        except Exception as e:
-            # Backend doesn't support tools — fall back to plain call_llm
-            if "tool" in str(e).lower() or getattr(getattr(e, "response", None), "status_code", None) == 400:
-                plain_text, plain_usage = call_llm(prompt, system=system, budget_remaining=budget_remaining)
-                return plain_text, plain_usage
-            raise
-
-        usage = response.usage
-        if usage:
-            total_input += usage.prompt_tokens
-            total_output += usage.completion_tokens
-            total_cost += (
-                usage.prompt_tokens * _get_input_cost() / 1_000_000
-                + usage.completion_tokens * _get_output_cost() / 1_000_000
-            )
-
-        choice = response.choices[0]
-        msg = choice.message
-
-        # Accumulate any text content
-        if msg.content:
-            final_text = msg.content
-
-        # If no tool calls, model is done
-        if not msg.tool_calls:
-            break
-
-        # Append assistant message (with tool_calls) to history
-        messages.append(msg)
-
-        # Execute each tool call and append results
-        tool_results = []
-        for tc in msg.tool_calls:
-            try:
-                args = json.loads(tc.function.arguments)
-            except (json.JSONDecodeError, AttributeError):
-                args = {}
-            output = _execute_tool_call(tc.function.name, args, cwd)
-            print(f"[tool:{tc.function.name}] {str(args.get('command',''))[:60]} → {output[:80]}")
-            tool_results.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": output,
-            })
-
-        messages.extend(tool_results)
-
-        if round_i == max_tool_rounds - 1:
-            print(f"[call_llm_with_tools] Reached max_tool_rounds={max_tool_rounds}, stopping.")
-            return final_text, {
-                "input_tokens": total_input,
-                "output_tokens": total_output,
-                "cost": total_cost,
-                "estimated_input_tokens": total_input,
-                "tool_rounds_exhausted": True,
-            }
-
-    return final_text, {
-        "input_tokens": total_input,
-        "output_tokens": total_output,
-        "cost": total_cost,
-        "estimated_input_tokens": total_input,
-        "tool_rounds_exhausted": False,
-    }
-
-
 def get_async_client() -> AsyncOpenAI:
     """Create async OpenAI-compatible client from env config."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -410,7 +209,7 @@ def get_async_client() -> AsyncOpenAI:
             "Get one at https://openrouter.ai/keys"
         )
     return AsyncOpenAI(
-        base_url=_get_base_url(),
+        base_url=_BASE_URL,
         api_key=api_key,
     )
 
@@ -433,7 +232,7 @@ async def call_llm_async(
         {"role": "system", "content": full_system},
         {"role": "user", "content": prompt},
     ]
-    kwargs = {"model": _get_model(), "messages": messages}
+    kwargs = {"model": _MODEL, "messages": messages}
     if not allow_tools:
         kwargs["tool_choice"] = "none"
 
@@ -441,7 +240,7 @@ async def call_llm_async(
         response = await client.chat.completions.create(**kwargs)
     except Exception as e:
         if not allow_tools and ("tool_choice" in str(e).lower() or getattr(getattr(e, "response", None), "status_code", None) == 400):
-            response = await client.chat.completions.create(model=_get_model(), messages=messages)
+            response = await client.chat.completions.create(model=_MODEL, messages=messages)
         else:
             raise
 
@@ -461,8 +260,8 @@ async def call_llm_async(
     input_tokens = usage.prompt_tokens if usage else est_input
     output_tokens = usage.completion_tokens if usage else count_tokens(text)
     cost = (
-        input_tokens * _get_input_cost() / 1_000_000
-        + output_tokens * _get_output_cost() / 1_000_000
+        input_tokens * _IN_COST / 1_000_000
+        + output_tokens * _OUT_COST / 1_000_000
     )
     return text, {
         "input_tokens": input_tokens,
@@ -501,7 +300,7 @@ async def call_llm_with_tools_async(
     for round_i in range(max_tool_rounds):
         try:
             response = await client.chat.completions.create(
-                model=_get_model(),
+                model=_MODEL,
                 messages=messages,
                 tools=[_BASH_TOOL],
                 tool_choice="auto",
@@ -517,8 +316,8 @@ async def call_llm_with_tools_async(
             total_input += usage.prompt_tokens
             total_output += usage.completion_tokens
             total_cost += (
-                usage.prompt_tokens * _get_input_cost() / 1_000_000
-                + usage.completion_tokens * _get_output_cost() / 1_000_000
+                usage.prompt_tokens * _IN_COST / 1_000_000
+                + usage.completion_tokens * _OUT_COST / 1_000_000
             )
 
         choice = response.choices[0]
@@ -549,12 +348,21 @@ async def call_llm_with_tools_async(
 
         if round_i == max_tool_rounds - 1:
             print(f"[call_llm_with_tools_async] Reached max_tool_rounds={max_tool_rounds}, stopping.")
+            def _msg_role(m):
+                return m["role"] if isinstance(m, dict) else getattr(m, "role", None)
+            def _msg_content(m):
+                return m["content"] if isinstance(m, dict) else getattr(m, "content", None)
+            tool_outputs = "\n\n".join(
+                _msg_content(m) for m in messages
+                if _msg_role(m) == "tool" and _msg_content(m)
+            )
             return final_text, {
                 "input_tokens": total_input,
                 "output_tokens": total_output,
                 "cost": total_cost,
                 "estimated_input_tokens": total_input,
                 "tool_rounds_exhausted": True,
+                "tool_outputs": tool_outputs,
             }
 
     return final_text, {
@@ -584,6 +392,23 @@ def load_skill_index(skills_dir: str) -> dict[str, str]:
     return index
 
 
+def _parse_skill_frontmatter(raw: str) -> dict:
+    """Parse YAML frontmatter from a SKILL.md string. Returns {} on failure."""
+    fm = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw, re.DOTALL)
+    if not fm:
+        return {}
+    try:
+        meta = yaml.safe_load(fm.group(1)) or {}
+    except yaml.YAMLError:
+        return {}
+    for key in ("required-keys", "allowed-tools"):
+        val = meta.get(key, [])
+        if isinstance(val, str):
+            val = [v.strip() for v in val.split(",") if v.strip()]
+        meta[key] = val
+    return meta
+
+
 def filter_skill_index(skills_dir: str, index: dict[str, str], api_keys: dict[str, bool]) -> dict[str, str]:
     """Remove skills whose required-keys are not available.
 
@@ -593,19 +418,8 @@ def filter_skill_index(skills_dir: str, index: dict[str, str], api_keys: dict[st
     filtered = {}
     for skill_id, desc in index.items():
         skill_file = Path(skills_dir) / skill_id / "SKILL.md"
-        required = []
-        if skill_file.exists():
-            raw = skill_file.read_text(encoding="utf-8")
-            fm = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw, re.DOTALL)
-            if fm:
-                try:
-                    meta = yaml.safe_load(fm.group(1)) or {}
-                    keys = meta.get("required-keys", [])
-                    if isinstance(keys, str):
-                        keys = [k.strip() for k in keys.split(",")]
-                    required = keys
-                except yaml.YAMLError:
-                    pass
+        meta = _parse_skill_frontmatter(skill_file.read_text(encoding="utf-8")) if skill_file.exists() else {}
+        required = meta.get("required-keys", [])
         if all(api_keys.get(k) for k in required):
             filtered[skill_id] = desc
     return filtered
@@ -621,30 +435,9 @@ def load_skill_content(skills_dir: str, skill_name: str) -> tuple[str, dict]:
     if not skill_file.exists():
         raise FileNotFoundError(f"SKILL.md not found: {skill_file}")
     raw = skill_file.read_text(encoding="utf-8")
-
-    # Parse YAML frontmatter (between --- delimiters)
-    metadata = {}
-    content = raw
+    metadata = _parse_skill_frontmatter(raw)
     fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw, re.DOTALL)
-    if fm_match:
-        try:
-            metadata = yaml.safe_load(fm_match.group(1)) or {}
-        except yaml.YAMLError:
-            metadata = {}
-        content = raw[fm_match.end():]
-
-    # Normalize allowed-tools to a list of strings
-    tools = metadata.get("allowed-tools", [])
-    if isinstance(tools, str):
-        tools = [t.strip() for t in tools.split(",")]
-    metadata["allowed-tools"] = tools
-
-    # Normalize required-keys to a list of strings
-    keys = metadata.get("required-keys", [])
-    if isinstance(keys, str):
-        keys = [k.strip() for k in keys.split(",")]
-    metadata["required-keys"] = keys
-
+    content = raw[fm_match.end():] if fm_match else raw
     return content.strip(), metadata
 
 

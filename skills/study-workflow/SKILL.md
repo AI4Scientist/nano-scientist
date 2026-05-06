@@ -1,10 +1,15 @@
 ---
 name: study-workflow
-description: Generates a publication-quality research workflow diagram (two swim-lanes: Research and Writing) as a PNG via gpt-5.4-image-2. Called internally by the pipeline to visualize the study plan.
-required-keys: [OPENROUTER_API_KEY]
+description: Generates a publication-quality research workflow diagram as a PNG via gpt-image-2 (OpenAI image API).
+required-keys: [OPENAI_API_KEY]
 allowed-tools: Bash
 ---
 
-This skill generates a visually rich research workflow diagram using the OpenRouter image API.
-It is called internally by `_generate_workflow_diagram_async` in `src/nodes.py`
-and writes `workflow.png` to the `figures/` subdirectory of the current output directory.
+Run the generator script with the paper draft as input:
+
+```bash
+python skills/study-workflow/scripts/generate.py --draft PATH [--output PATH]
+```
+
+- `--draft`: path to a `.tex` / `.md` file, or raw text describing the workflow
+- `--output`: output PNG path (default: `workflow.png` in cwd)

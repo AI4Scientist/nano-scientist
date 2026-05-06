@@ -408,30 +408,31 @@ async def _generate_workflow_diagram_async(shared: dict):
 
     topic = shared.get("topic", "research")[:80]
 
-    # Derive research steps from actual experiment/literature history labels
+    # Derive research/writing step labels for inclusion in the draft context
     lit_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
     exp_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
     research_steps = (lit_labels + exp_labels) or ["Literature Survey", "Data Collection", "Analysis"]
-
-    # Derive writing steps from the actual written section titles (capitalised)
-    write_steps = [s.replace("_", " ").title()
-                   for s in _section_order(shared)
-                   if s in shared.get("section_bodies", {})][:8] or ["Introduction", "Methods", "Results", "Conclusion"]
-
-    # Build full draft text from all written sections for richer diagram content
     order = _section_order(shared)
-    draft_text = "\n\n".join(
+    write_steps = [s.replace("_", " ").title()
+                   for s in order if s in shared.get("section_bodies", {})][:8] \
+                  or ["Introduction", "Methods", "Results", "Conclusion"]
+
+    # Fold topic/steps into the draft so generate.py (--draft only) gets full context
+    section_text = "\n\n".join(
         shared["section_bodies"][s][:800]
         for s in order if s in shared.get("section_bodies", {})
+    )
+    draft_text = (
+        f"Topic: {topic}\n"
+        f"Research steps: {', '.join(research_steps)}\n"
+        f"Writing steps: {', '.join(write_steps)}\n\n"
+        f"{section_text}"
     )
 
     def _run():
         return subprocess.run(
             ["python", str(generate_script),
              "--output", str(dest),
-             "--research-steps", json.dumps(research_steps),
-             "--write-steps", json.dumps(write_steps),
-             "--topic", topic,
              "--draft", draft_text],
             capture_output=True, text=True, errors="replace",
             timeout=int(os.environ.get("LATEX_COMPILE_TIMEOUT", "60")),
@@ -492,11 +493,15 @@ _SKILL_SYSTEM = (
     "Cite sources with %%BEGIN BIBTEX%% ... %%END BIBTEX%%."
 )
 
-_WRITE_SYSTEM = (
-    "You are an academic writing agent. "
-    "Write the assigned paper section as compilable LaTeX. "
-    "Be precise, citation-backed, and follow all LaTeX rules given."
-)
+def _write_system(shared: dict) -> str:
+    lang = shared.get("output_language", "")
+    lang_clause = f" Write entirely in {lang}." if lang else ""
+    return (
+        "You are an academic writing agent."
+        + lang_clause +
+        " Write the assigned paper section as compilable LaTeX."
+        " Be precise, citation-backed, and follow all LaTeX rules given."
+    )
 
 _REVIEW_SYSTEM = (
     "You are a rigorous peer reviewer. "
@@ -587,16 +592,17 @@ async def _execute_skill(skill_name: str, stage: str, shared: dict):
         )
         if usage.get("tool_rounds_exhausted"):
             print(f"[{stage}] {skill_name}: tool rounds exhausted — salvaging.")
+            salvage_context = (usage.get("tool_outputs") or text)[:SALVAGE_CONTEXT_CHARS]
             salvage_text, salvage_usage = await call_llm_async(
                 f"Summarise ALL findings collected so far in this step.\n"
-                f"Step: {skill_name}\nPartial output:\n{text[:SALVAGE_CONTEXT_CHARS]}\n\n"
+                f"Step: {skill_name}\nTool outputs:\n{salvage_context}\n\n"
                 "Write 200–400 words of findings, then cite:\n"
                 "%%BEGIN BIBTEX%%\n@article{key, author={...}, title={...}, year={YYYY}}\n%%END BIBTEX%%",
                 budget_remaining=shared.get("budget_remaining", 0),
                 cost_log=shared.get("cost_log"),
             )
             track_cost(shared, f"{stage}:salvage:{skill_name}", salvage_usage)
-            text = text + "\n\n## SALVAGE SUMMARY\n" + salvage_text
+            text = salvage_text
     else:
         text, usage = await call_llm_async(
             prompt,
@@ -761,9 +767,14 @@ async def _write_section(section: str, shared: dict):
     if data_block:
         data_block = "\n\n" + data_block
 
+    lang = await _detect_language_async(shared["topic"], shared)
+    # Also embed language in research_goal once detected
+    if lang and "Write all outputs in" not in shared.get("research_goal", ""):
+        shared["research_goal"] = shared.get("research_goal", "") + f" Write all outputs in {lang}."
+    lang_instruction = f"\n## Output language\nWrite ALL prose in {lang}. Section headings, body text, captions, and abstract MUST be in {lang}. LaTeX commands stay in English.\n" if lang else ""
     text, usage = await call_llm_async(
         f"""Write the **{section}** section of a research paper as compilable LaTeX.
-
+{lang_instruction}
 ## Topic: {shared["topic"]}
 ## Artifacts
 {artifact_text}{prior_text}{figures_block}{data_block}
@@ -806,7 +817,7 @@ async def _write_section(section: str, shared: dict):
 \\section{{{section.title()}}}
 ...
 %%END SECTION%%""",
-        system=_WRITE_SYSTEM,
+        system=_write_system(shared),
         budget_remaining=shared.get("budget_remaining", 0),
         cost_log=shared.get("cost_log"),
     )
@@ -828,7 +839,7 @@ async def _write_section(section: str, shared: dict):
             f"## Artifacts\n{artifact_text[:ARTIFACT_CONTEXT_CHARS]}\n"
             f"## BibTeX keys (use ONLY these, do not invent new ones): {', '.join(cite_keys) or 'None'}\n\n"
             f"%%BEGIN SECTION%%\n\\section{{{section.title()}}}\n...content...\n%%END SECTION%%",
-            system=_WRITE_SYSTEM,
+            system=_write_system(shared),
             budget_remaining=shared.get("budget_remaining", 0),
             cost_log=shared.get("cost_log"),
         )
@@ -959,16 +970,52 @@ async def _assemble_tex(shared: dict):
     print(f"[assemble_tex] report.tex assembled ({len(tex)} chars)")
 
 
+async def _detect_language_async(topic: str, shared: dict) -> str:
+    """Return the output language name for the paper.
+
+    Priority:
+    1. OUTPUT_LANGUAGE env var (explicit override, e.g. "French")
+    2. Cached value already in shared["output_language"]
+    3. LLM call to identify the language from the topic text
+    4. Falls back to "" (English) if topic is ASCII-only or LLM call fails
+    """
+    env_lang = os.environ.get("OUTPUT_LANGUAGE", "").strip()
+    if env_lang:
+        return env_lang
+
+    cached = shared.get("output_language")
+    if cached is not None:
+        return cached
+
+    # ASCII-only topics are always English — skip the LLM call
+    if all(ord(ch) < 128 for ch in topic):
+        shared["output_language"] = ""
+        return ""
+
+    try:
+        text, usage = await call_llm_async(
+            f"What language is this text written in? Reply with ONLY the language name "
+            f"(e.g. 'Chinese', 'French', 'Japanese'). Text: {topic[:200]}",
+            system="You are a language detector. Reply with only the language name, nothing else.",
+            budget_remaining=shared.get("budget_remaining", 0),
+            cost_log=shared.get("cost_log"),
+        )
+        track_cost(shared, "init:detect_language", usage)
+        lang = text.strip().strip("'\"").split("\n")[0]
+    except Exception as e:
+        print(f"[detect_language] LLM call failed: {e}")
+        lang = ""
+
+    shared["output_language"] = lang
+    if lang:
+        print(f"[detect_language] detected: {lang}")
+    return lang
+
+
 # ===========================================================================
 # 1. Initializer
 # ===========================================================================
 class Initializer(Node):
-    def prep(self, shared):
-        return None
-
-    def exec(self, prep_res):
-        return None
-
     def post(self, shared, prep_res, exec_res):
         task_id = str(uuid.uuid4())
         out_dir = Path(shared.get("output_dir", "outputs")) / task_id
@@ -978,6 +1025,7 @@ class Initializer(Node):
         shared.update({
             "output_path": str(out_dir),
             "budget_remaining": shared["budget_dollars"],
+            "output_language": None,  # detected lazily on first write via LLM
             "research_goal": f"Advance understanding of: {shared['topic']}",
             "artifacts": {}, "bibtex_entries": [], "history": [],
             "sections_written": [], "section_bodies": {},
@@ -991,12 +1039,6 @@ class Initializer(Node):
 # 2. LiteratureReviewLoop
 # ===========================================================================
 class LiteratureReviewLoop(AsyncNode):
-    async def prep_async(self, shared):
-        return shared
-
-    async def exec_async(self, shared):
-        return shared
-
     async def post_async(self, shared, prep_res, exec_res):
         literature_skills = {"paper-navigator", "research-survey", "research-ideation",
                              "evo-memory", "paper-planning"}
@@ -1016,12 +1058,6 @@ class LiteratureReviewLoop(AsyncNode):
 # 3. ExperimentationLoop
 # ===========================================================================
 class ExperimentationLoop(AsyncNode):
-    async def prep_async(self, shared):
-        return shared
-
-    async def exec_async(self, shared):
-        return shared
-
     async def post_async(self, shared, prep_res, exec_res):
         experiment_skills = {"experiment-pipeline", "experiment-craft",
                              "experiment-iterative-coder", "evo-memory"}
@@ -1041,12 +1077,6 @@ class ExperimentationLoop(AsyncNode):
 # 4. WritingLoop
 # ===========================================================================
 class WritingLoop(AsyncNode):
-    async def prep_async(self, shared):
-        return shared
-
-    async def exec_async(self, shared):
-        return shared
-
     async def post_async(self, shared, prep_res, exec_res):
         sections = _section_order(shared)
         max_review_rounds = int(os.environ.get("MAX_REVIEW_ROUNDS", "1"))
@@ -1091,41 +1121,7 @@ class WritingLoop(AsyncNode):
 
         # Generate workflow diagram via the study-workflow skill, informed by the full draft.
         # Build args that generate.py needs and store them in shared so _execute_skill can use them.
-        if "study-workflow" in shared.get("skill_index", {}):
-            order = _section_order(shared)
-            lit_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
-            exp_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
-            draft_excerpt = "\n\n".join(
-                f"[{s.upper()}]\n{shared['section_bodies'][s][:500]}"
-                for s in order if s in shared.get("section_bodies", {})
-            )
-            generate_script = Path(__file__).resolve().parents[1] / "skills" / "study-workflow" / "scripts" / "generate.py"
-            abs_out = Path(shared["output_path"]).resolve()
-            research_steps_json = json.dumps(
-                (lit_labels + exp_labels) or ["Literature Survey", "Data Collection", "Analysis"]
-            )
-            write_steps_json = json.dumps([
-                s.replace("_", " ").title()
-                for s in order if s in shared.get("section_bodies", {})
-            ][:8] or ["Introduction", "Methods", "Results", "Conclusion"])
-            topic_str = shared.get("topic", "Research Workflow")[:80].replace('"', "'")
-            # Store a ready-to-run hint in shared so _execute_skill prompt picks it up via _existing_files / context
-            shared["_workflow_hint"] = (
-                f"TASK: Run study-workflow/scripts/generate.py to create figures/workflow.png.\n"
-                f"Use this exact command (write the draft excerpt to a temp file to avoid shell quoting issues):\n\n"
-                f"python {generate_script} \\\n"
-                f"  --output {abs_out}/figures/workflow.png \\\n"
-                f"  --research-steps '{research_steps_json}' \\\n"
-                f"  --write-steps '{write_steps_json}' \\\n"
-                f"  --topic \"{topic_str}\" \\\n"
-                f"  --draft \"$(cat /tmp/workflow_draft.txt)\"\n\n"
-                f"Write the draft excerpt first:\n"
-                f"cat > /tmp/workflow_draft.txt << 'DRAFTEOF'\n{draft_excerpt[:2000]}\nDRAFTEOF\n"
-            )
-            await _execute_skill("study-workflow", "writing", shared)
-            shared.pop("_workflow_hint", None)
-        else:
-            await _generate_workflow_diagram_async(shared)
+        await _generate_workflow_diagram_async(shared)
 
         # Final tex assembly with title
         await _assemble_tex(shared)

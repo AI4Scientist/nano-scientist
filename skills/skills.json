@@ -46,7 +46,7 @@
     },
     {
       "id": "study-workflow",
-      "description": "Generates a research workflow diagram (Research + Writing swim-lanes) as a PNG via gpt-5.4-image-2."
+      "description": "Generate a publication-quality research workflow diagram as a PNG from the paper draft via gpt-image-2."
     }
   ]
 }

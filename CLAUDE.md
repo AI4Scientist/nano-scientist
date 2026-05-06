@@ -24,7 +24,7 @@ Each loop runs `_run_loop`: each iteration the LLM decides `action: skill|done`,
 
 | Node | Role |
 |---|---|
-| **Initializer** | Zero LLM calls — infers report type from budget, creates `outputs/<uuid>/` |
+| **Initializer** | Zero LLM calls at init — creates `outputs/<uuid>/`; output language detected via LLM lazily on first write |
 | **LiteratureReviewLoop** | Autonomous loop over literature skills (paper-navigator, research-survey, etc.); exits when literature goal met or budget low |
 | **ExperimentationLoop** | Autonomous loop over experiment skills (experiment-pipeline, experiment-craft, etc.); exits when experiment goal met or budget low |
 | **WritingLoop** | Writes all required sections, runs a writing review pass, addresses major comments; assembles final .tex |
@@ -40,7 +40,7 @@ Each loop runs `_run_loop`: each iteration the LLM decides `action: skill|done`,
 | `skills/skills.json` | Skill index (id + description) |
 
 ## Shared store keys
-`topic`, `research_goal`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `history`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `fix_attempts`, `paper_title`, `figures_used`, `api_keys`
+`topic`, `research_goal`, `budget_dollars`, `budget_remaining`, `cost_log`, `skill_index`, `skills_dir`, `output_dir`, `output_path`, `history`, `artifacts`, `bibtex_entries`, `sections_written`, `section_bodies`, `tex_content`, `bib_content`, `fix_attempts`, `paper_title`, `figures_used`, `api_keys`, `output_language`
 
 `history` entries: `{"step": int, "stage": "literature"|"experiment"|"writing"|"writing_revision", "label": str, "summary": str, "cost": float, "error": str|null}`
 
@@ -59,6 +59,7 @@ Required: `OPENROUTER_API_KEY` (all nodes).
 Optional (skill-gated): `HF_TOKEN`, `GITHUB_TOKEN`, `S2_API_KEY`.
 Inference: `MODEL_NAME`, `INFERENCE_BASE_URL`, `INPUT_TOKEN_COST_PER_MILLION`, `OUTPUT_TOKEN_COST_PER_MILLION`.
 Agent: `LOOKBACK` (default 3), `MAX_REVIEW_ROUNDS` (default 1), `MAX_TOOL_ROUNDS` (default 16), `MAX_LOOP_ITERATIONS` (default 20).
+Language: `OUTPUT_LANGUAGE` (optional) — force a specific output language (e.g. `"French"`). If unset, language is auto-detected via an LLM call on first write: topics containing non-ASCII text trigger detection, ASCII-only topics default to English.
 Tuning (all optional; nodes.py defaults in `_DEFAULTS`, utils.py defaults as module-level constants):
 - Timeouts: `CODE_EXEC_TIMEOUT` (default 300s), `LATEX_COMPILE_TIMEOUT` (default 60s)
 - Tool execution: `TOOL_DEFAULT_TIMEOUT` (default 60s), `TOOL_MAX_TIMEOUT` (default 300s), `TOOL_STDOUT_LIMIT` (default 4000 chars), `TOOL_STDERR_LIMIT` (default 1000 chars)
