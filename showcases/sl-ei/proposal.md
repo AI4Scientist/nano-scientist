@@ -1,0 +1,1 @@
+A survey of scaling law on embodied intelligence.

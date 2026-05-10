@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import yaml
 from pathlib import Path
 from openai import AsyncOpenAI
@@ -16,16 +17,16 @@ except ImportError:
     _TIKTOKEN_AVAILABLE = False
 
 
-_MODEL: str
-_IN_COST: float
-_OUT_COST: float
-_BASE_URL: str
-_EST_AVG_PROMPT_TOKENS: int
-_EST_AVG_OUTPUT_TOKENS: int
-_TOOL_DEFAULT_TIMEOUT: int
-_TOOL_MAX_TIMEOUT: int
-_TOOL_STDOUT_LIMIT: int
-_TOOL_STDERR_LIMIT: int
+_MODEL: str                  = "z-ai/glm-5"
+_IN_COST: float              = 0.95
+_OUT_COST: float             = 2.55
+_BASE_URL: str               = "https://openrouter.ai/api/v1"
+_EST_AVG_PROMPT_TOKENS: int  = 500
+_EST_AVG_OUTPUT_TOKENS: int  = 300
+_TOOL_DEFAULT_TIMEOUT: int   = 60
+_TOOL_MAX_TIMEOUT: int       = 300
+_TOOL_STDOUT_LIMIT: int      = 4000
+_TOOL_STDERR_LIMIT: int      = 1000
 
 
 def init_env(env_path: str = None):
@@ -60,7 +61,7 @@ API_KEY_REGISTRY = {
     # --- REQUIRED ---
     "OPENROUTER_API_KEY": "[REQUIRED] Core LLM inference — every node calls the LLM through OpenRouter; without this key the agent cannot run at all",
     # --- SKILL-GATED ---
-    "S2_API_KEY":         "Required by paper-navigator (Semantic Scholar search and citation traversal)",
+    "S2_API_KEY":         "Used by paper-navigator (Semantic Scholar search); may return 403 Forbidden — fall back to arXiv or Perplexity if S2 is unavailable",
     "GITHUB_TOKEN":       "Required by paper-navigator and experiment skills (GitHub code/repo search)",
     "HF_TOKEN":           "Required by experiment skills (Hugging Face model/dataset discovery)"
 }
@@ -73,16 +74,6 @@ def detect_api_keys() -> dict[str, bool]:
     Must be called AFTER init_env().
     """
     return {key: bool(os.environ.get(key)) for key in API_KEY_REGISTRY}
-
-
-def format_available_keys(keys: dict[str, bool]) -> str:
-    """Format detected API keys as a readable summary for LLM prompts."""
-    lines = []
-    for key, is_set in keys.items():
-        status = "available" if is_set else "NOT SET"
-        desc = API_KEY_REGISTRY.get(key, "")
-        lines.append(f"- {key}: {status} — {desc}")
-    return "\n".join(lines)
 
 
 # --- Token counting ---
@@ -170,7 +161,6 @@ _BASH_TOOL = {
 
 def _execute_tool_call(tool_name: str, arguments: dict, cwd: str) -> str:
     """Execute a model-requested tool call and return its output as a string."""
-    import subprocess
     if tool_name == "bash":
         command = arguments.get("command", "")
         # Strip leading `sleep N` calls — they waste tool rounds and cause timeouts.
@@ -181,8 +171,7 @@ def _execute_tool_call(tool_name: str, arguments: dict, cwd: str) -> str:
                 command, shell=True, cwd=cwd,
                 capture_output=True, text=True,
                 errors="replace", timeout=timeout,
-                env={**os.environ},
-            )
+                )
             out = r.stdout[:_TOOL_STDOUT_LIMIT]
             err = r.stderr[:_TOOL_STDERR_LIMIT]
             result = f"exit={r.returncode}"
@@ -220,8 +209,10 @@ async def call_llm_async(
     budget_remaining: float = None,
     allow_tools: bool = False,
     cost_log: list = None,
+    model: str = None,
 ) -> tuple[str, dict]:
     """Async version of call_llm."""
+    active_model = model or _MODEL
     calls_left = estimate_calls_remaining(budget_remaining or 0, cost_log=cost_log)
     budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(calls=calls_left)
     full_system = budget_ctx + ("\n\n" + system if system else "")
@@ -232,7 +223,7 @@ async def call_llm_async(
         {"role": "system", "content": full_system},
         {"role": "user", "content": prompt},
     ]
-    kwargs = {"model": _MODEL, "messages": messages}
+    kwargs = {"model": active_model, "messages": messages}
     if not allow_tools:
         kwargs["tool_choice"] = "none"
 
@@ -240,7 +231,7 @@ async def call_llm_async(
         response = await client.chat.completions.create(**kwargs)
     except Exception as e:
         if not allow_tools and ("tool_choice" in str(e).lower() or getattr(getattr(e, "response", None), "status_code", None) == 400):
-            response = await client.chat.completions.create(model=_MODEL, messages=messages)
+            response = await client.chat.completions.create(model=active_model, messages=messages)
         else:
             raise
 
@@ -278,14 +269,17 @@ async def call_llm_with_tools_async(
     cwd: str = ".",
     max_tool_rounds: int = None,
     cost_log: list = None,
+    model: str = None,
 ) -> tuple[str, dict]:
     """Async version of call_llm_with_tools. Tool execution runs in a thread pool."""
+    active_model = model or _MODEL
     if max_tool_rounds is None:
         max_tool_rounds = int(os.environ.get("MAX_TOOL_ROUNDS", "16"))
     calls_left = estimate_calls_remaining(budget_remaining or 0, cost_log=cost_log)
     budget_ctx = _SYSTEM_PROMPT_TEMPLATE.format(calls=calls_left)
     full_system = budget_ctx + ("\n\n" + system if system else "")
 
+    all_tools = [_BASH_TOOL]
     client = get_async_client()
     messages = [
         {"role": "system", "content": full_system},
@@ -300,14 +294,14 @@ async def call_llm_with_tools_async(
     for round_i in range(max_tool_rounds):
         try:
             response = await client.chat.completions.create(
-                model=_MODEL,
+                model=active_model,
                 messages=messages,
-                tools=[_BASH_TOOL],
+                tools=all_tools,
                 tool_choice="auto",
             )
         except Exception as e:
             if "tool" in str(e).lower() or getattr(getattr(e, "response", None), "status_code", None) == 400:
-                plain_text, plain_usage = await call_llm_async(prompt, system=system, budget_remaining=budget_remaining)
+                plain_text, plain_usage = await call_llm_async(prompt, system=system, budget_remaining=budget_remaining, model=active_model)
                 return plain_text, plain_usage
             raise
 
@@ -334,8 +328,7 @@ async def call_llm_with_tools_async(
                 args = json.loads(tc.function.arguments)
             except (json.JSONDecodeError, AttributeError):
                 args = {}
-            # Run blocking tool execution in thread pool to not block event loop
-            output = await asyncio.get_event_loop().run_in_executor(
+            output = await asyncio.get_running_loop().run_in_executor(
                 None, _execute_tool_call, tc.function.name, args, cwd
             )
             print(f"[tool:{tc.function.name}] {str(args.get('command',''))[:60]} → {output[:80]}")

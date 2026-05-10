@@ -15,7 +15,9 @@ import sys
 import tempfile
 
 from pathlib import Path
-from src.utils import init_env, load_skill_index, filter_skill_index, detect_api_keys
+from src.utils import (
+    init_env, load_skill_index, filter_skill_index, detect_api_keys,
+)
 from src.flow import create_scientist_flow
 
 # Resolve project paths
@@ -52,7 +54,7 @@ class _Tee:
             self._file.close()
 
 def list_skills():
-    """Print available skills (from skills.json index)."""
+    """Print available skills."""
     index = load_skill_index(str(SKILLS_DIR))
     print(f"\nAvailable Skills ({len(index)}):")
     print("-" * 50)
@@ -85,10 +87,10 @@ def run(topic: str, budget: float, output_dir: str):
         "budget_dollars": budget,
         "budget_remaining": budget,
         "cost_log": [],
-        "skill_index": skill_index,       # lightweight: {name: description}
-        "skills_dir": str(SKILLS_DIR),    # path for lazy-loading SKILL.md
+        "skill_index": skill_index,        # lightweight: {name: description}
+        "skills_dir": str(SKILLS_DIR),     # path for lazy-loading SKILL.md
         "output_dir": output_dir,
-        "api_keys": api_keys,             # {key_name: is_set} for capability awareness
+        "api_keys": api_keys,              # {key_name: is_set} for capability awareness
     }
 
     # Create and run flow
@@ -148,7 +150,7 @@ Examples:
         help="Output directory (default: outputs/)",
     )
     parser.add_argument(
-        "--list-skills", action="store_true", help="List available skills",
+        "--list-skills", action="store_true", help="List available skills and MCP servers",
     )
     parser.add_argument(
         "--env", "-e", default=".env",

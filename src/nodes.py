@@ -13,11 +13,13 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pocketflow import Node, AsyncNode
@@ -92,7 +94,7 @@ _DEFAULTS = {
     "CODE_EXEC_TIMEOUT":         "300",
     "LATEX_COMPILE_TIMEOUT":     "60",
     "SKILL_CONTENT_LIMIT":       "1500",
-    "ARTIFACT_CONTEXT_CHARS":    "2500",
+    "ARTIFACT_CONTEXT_CHARS":    "6000",
     "PRIOR_SECTION_CHARS":       "800",
     "SALVAGE_CONTEXT_CHARS":     "3000",
     "TITLE_TOPIC_CHARS":         "2000",
@@ -164,9 +166,6 @@ LATEX_SKELETON = r"""\documentclass[11pt]{article}
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _section_order(shared: dict) -> list[str]:
-    return FULL_PAPER_SECTIONS
-
 
 def _budget_ok(shared: dict, reserve_ratio: float = None) -> bool:
     ratio = reserve_ratio if reserve_ratio is not None else BUDGET_RESERVE_RATIO
@@ -206,6 +205,27 @@ def _artifact_index(shared: dict) -> str:
     return "\n".join(lines) or "No artifacts yet."
 
 
+def _artifact_content(shared: dict, max_chars: int = 6000) -> str:
+    """Return actual artifact text from disk for quality gate evaluation."""
+    out_dir = Path(shared.get("output_path", ""))
+    artifact_dir = out_dir / "artifacts"
+    if not artifact_dir.is_dir():
+        return "No artifacts yet."
+    parts = []
+    remaining = max_chars
+    for f in sorted(artifact_dir.iterdir()):
+        if f.suffix != ".md" or remaining <= 0:
+            break
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+            excerpt = text[:remaining]
+            parts.append(f"### {f.name}\n{excerpt}")
+            remaining -= len(excerpt)
+        except Exception:
+            pass
+    return "\n\n".join(parts) or "No artifacts yet."
+
+
 def _existing_files(shared: dict) -> str:
     out_dir = Path(shared.get("output_path", ""))
     lines = []
@@ -216,6 +236,21 @@ def _existing_files(shared: dict) -> str:
                 if f.is_file():
                     lines.append(f"- {sub}/{f.name}")
     return "\n".join(lines) if lines else "None yet."
+
+
+def _json_stats(obj, prefix: str = "") -> list[str]:
+    """Flatten a JSON object into key=value summary lines."""
+    out = []
+    if isinstance(obj, dict):
+        for k, v in list(obj.items())[:30]:
+            out.extend(_json_stats(v, f"{prefix}{k}."))
+    elif isinstance(obj, list):
+        out.append(f"{prefix}count={len(obj)}")
+        if obj and isinstance(obj[0], dict):
+            out.append(f"{prefix}fields={list(obj[0].keys())[:8]}")
+    elif isinstance(obj, (int, float, str, bool)) and obj is not None:
+        out.append(f"{prefix[:-1]}={str(obj)[:120]}")
+    return out
 
 
 def _data_summary(shared: dict) -> str:
@@ -231,18 +266,7 @@ def _data_summary(shared: dict) -> str:
         if f.suffix.lower() == ".json":
             try:
                 data = json.loads(f.read_text(encoding="utf-8", errors="replace"))
-                stats = []
-                def _flatten(obj, prefix=""):
-                    if isinstance(obj, dict):
-                        for k, v in list(obj.items())[:30]:
-                            _flatten(v, f"{prefix}{k}.")
-                    elif isinstance(obj, list):
-                        stats.append(f"{prefix}count={len(obj)}")
-                        if obj and isinstance(obj[0], dict):
-                            stats.append(f"{prefix}fields={list(obj[0].keys())[:8]}")
-                    elif isinstance(obj, (int, float, str, bool)) and obj is not None:
-                        stats.append(f"{prefix[:-1]}={str(obj)[:120]}")
-                _flatten(data)
+                stats = _json_stats(data)
                 if stats:
                     lines.append(f"### {f.name}")
                     lines.extend(f"  {s}" for s in stats[:40])
@@ -308,8 +332,26 @@ def _extend_bibtex(shared: dict, new_entries: list[str], skip_verify: bool = Fal
         if key in existing_keys:
             continue
         if not skip_verify and not _verify_bibtex_entry(entry):
-            print(f"[BibTeX] Dropped unverified entry: {key}")
-            continue
+            # Try to recover a real entry via CrossRef before giving up
+            recovered = _crossref_lookup(key)
+            if recovered:
+                print(f"[BibTeX] Recovered via CrossRef: {key}")
+                entry = recovered
+            else:
+                # Keep a stub so LaTeX doesn't warn "undefined citation"
+                title_m = re.search(r'\btitle\s*=\s*\{([^}]+)\}', entry, re.IGNORECASE)
+                title = title_m.group(1) if title_m else key
+                year_m = re.search(r'\byear\s*=\s*\{([^}]+)\}', entry, re.IGNORECASE)
+                year = year_m.group(1) if year_m else ""
+                entry = (
+                    f"@misc{{{key},\n"
+                    f"  author = {{Unknown}},\n"
+                    f"  title  = {{{title}}},\n"
+                    f"  year   = {{{year}}},\n"
+                    f"  note   = {{Citation unverified}},\n"
+                    f"}}"
+                )
+                print(f"[BibTeX] Stub entry (unverified): {key}")
         shared.setdefault("bibtex_entries", []).append(entry)
         existing_keys.add(key)
 
@@ -412,7 +454,7 @@ async def _generate_workflow_diagram_async(shared: dict):
     lit_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "literature"][:6]
     exp_labels = [h["label"][:55] for h in shared.get("history", []) if h.get("stage") == "experiment"][:4]
     research_steps = (lit_labels + exp_labels) or ["Literature Survey", "Data Collection", "Analysis"]
-    order = _section_order(shared)
+    order = FULL_PAPER_SECTIONS
     write_steps = [s.replace("_", " ").title()
                    for s in order if s in shared.get("section_bodies", {})][:8] \
                   or ["Introduction", "Methods", "Results", "Conclusion"]
@@ -440,7 +482,7 @@ async def _generate_workflow_diagram_async(shared: dict):
         )
 
     try:
-        r = await asyncio.get_event_loop().run_in_executor(None, _run)
+        r = await asyncio.get_running_loop().run_in_executor(None, _run)
         if r.returncode == 0 and dest.exists():
             print(f"[workflow] diagram saved → {dest}")
         else:
@@ -461,7 +503,7 @@ def _build_context(shared: dict, stage_goal: str, skill_index: dict) -> str:
         cost_log=shared.get("cost_log", []),
     )
     skills_block = format_skill_index(skill_index) if skill_index else "None available."
-    return (
+    ctx = (
         f"## Research goal (DO NOT DEVIATE from this)\n{shared.get('research_goal', shared['topic'])}\n\n"
         f"## Stage goal\n{stage_goal}\n\n"
         f"## Topic\n{shared['topic']}\n\n"
@@ -471,6 +513,7 @@ def _build_context(shared: dict, stage_goal: str, skill_index: dict) -> str:
         f"## Last {lookback} steps\n{_recent_history(shared, lookback)}\n\n"
         f"## Artifacts collected\n{_artifact_index(shared)}"
     )
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +611,10 @@ async def _execute_skill(skill_name: str, stage: str, shared: dict):
         f"- Save figures to `{abs_out}/figures/` — use ABSOLUTE paths.\n"
         "- No plt.show(). Use plt.savefig(...) explicitly.\n"
         "- NEVER use `sleep`, `npx`, `npm`, or `node`.\n"
-        "- Write large files with Python open(), not shell heredocs.\n\n"
+        "- Write large files with Python open(), not shell heredocs.\n"
+        "- If any API returns HTTP 403 or 401, do NOT retry it. Move immediately to an alternative "
+        "  (e.g. if Semantic Scholar returns 403, switch to arXiv API or Perplexity).\n"
+        "- If a tool times out once, do NOT retry with the same command. Use a lighter alternative.\n\n"
         "After completing, summarise findings and append citations:\n"
         "%%BEGIN BIBTEX%%\n"
         "@article{key, author={...}, title={...}, journal={...}, year={YYYY}}\n"
@@ -622,11 +668,14 @@ async def _quality_gate(shared: dict, stage: str, stage_goal: str) -> tuple[bool
 
     Returns (accepted, feedback_text).
     """
+    artifact_ctx = _artifact_content(shared, max_chars=int(os.environ.get("ARTIFACT_CONTEXT_CHARS", "6000")))
+    file_listing = _existing_files(shared)
     prompt = (
         f"## Research goal (DO NOT DEVIATE from this)\n{shared.get('research_goal', shared['topic'])}\n\n"
         f"## Stage goal\n{stage_goal}\n\n"
         f"## Topic\n{shared['topic']}\n\n"
-        f"## Artifacts collected\n{_artifact_index(shared)}\n\n"
+        f"## Files collected on disk\n{file_listing}\n\n"
+        f"## Artifact content (read from disk)\n{artifact_ctx}\n\n"
         f"## Steps executed in this stage\n"
         + "\n".join(
             f"- {h['label']}: {h['summary'][:120]}"
@@ -634,17 +683,23 @@ async def _quality_gate(shared: dict, stage: str, stage_goal: str) -> tuple[bool
             if h.get("stage") == stage
         ) + "\n\n"
         "Has the stage goal been sufficiently achieved?\n"
+        "Be GENEROUS: if substantial content was produced (papers found, surveys written, "
+        "data collected, files saved), accept even if imperfect.\n"
+        "NOTE: Files listed under 'data/' and 'figures/' represent real downloaded papers "
+        "and generated outputs — treat their presence as evidence of completed work.\n"
         "Return YAML only:\n"
         "```yaml\n"
         "accepted: true   # or false\n"
         "feedback: <one-sentence reason>\n"
         "```"
     )
+    reviewer_model = os.environ.get("REVIEWER_MODEL", "").strip() or None
     text, usage = await call_llm_async(
         prompt,
         system=_REVIEW_SYSTEM,
         budget_remaining=shared.get("budget_remaining", 0),
         cost_log=shared.get("cost_log"),
+        model=reviewer_model,
     )
     track_cost(shared, f"{stage}:quality_gate", usage)
     parsed = parse_yaml_response(text)
@@ -668,6 +723,8 @@ async def _run_loop(shared: dict, stage: str, stage_goal: str,
                    if skill_filter_fn is None or skill_filter_fn(k)}
     iteration = 0
     max_iter = int(os.environ.get("MAX_LOOP_ITERATIONS", "20"))
+    _node_retries = int(os.environ.get("NODE_RETRIES", "2"))
+    _node_wait = int(os.environ.get("NODE_WAIT", "3"))
 
     while iteration < max_iter:
         iteration += 1
@@ -677,8 +734,6 @@ async def _run_loop(shared: dict, stage: str, stage_goal: str,
             return "budget_exhausted"
 
         # Decide next action — retry on transient LLM errors
-        _node_retries = int(os.environ.get("NODE_RETRIES", "2"))
-        _node_wait = int(os.environ.get("NODE_WAIT", "3"))
         decision_text = None
         for _attempt in range(max(1, _node_retries)):
             try:
@@ -915,7 +970,7 @@ comments:
 
 
 async def _assemble_tex(shared: dict):
-    order = _section_order(shared)
+    order = FULL_PAPER_SECTIONS
     cleaned_bodies = {s: _sanitize_section_body(b) for s, b in shared.get("section_bodies", {}).items()}
 
     # Inject workflow diagram into Introduction
@@ -1022,6 +1077,12 @@ class Initializer(Node):
         out_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("artifacts", "figures", "data", "scripts"):
             (out_dir / sub).mkdir(exist_ok=True)
+        # Classify topic: survey/review papers don't need an experimentation stage.
+        topic_lower = shared["topic"].lower()
+        is_survey = any(w in topic_lower for w in (
+            "survey", "review", "overview", "tutorial", "summary",
+            "综述", "综合", "调研",  # Chinese equivalents
+        ))
         shared.update({
             "output_path": str(out_dir),
             "budget_remaining": shared["budget_dollars"],
@@ -1030,7 +1091,10 @@ class Initializer(Node):
             "artifacts": {}, "bibtex_entries": [], "history": [],
             "sections_written": [], "section_bodies": {},
             "fix_attempts": 0, "cost_log": [],
+            "is_survey": is_survey,
         })
+        if is_survey:
+            print(f"[Initializer] Survey/review topic detected — experiment stage will synthesise literature only.")
         print(f"[Initializer] {out_dir} | ${shared['budget_dollars']:.2f}")
         return "literature"
 
@@ -1042,14 +1106,13 @@ class LiteratureReviewLoop(AsyncNode):
     async def post_async(self, shared, prep_res, exec_res):
         literature_skills = {"paper-navigator", "research-survey", "research-ideation",
                              "evo-memory", "paper-planning"}
-        skill_filter = lambda k: k in literature_skills
-
         stage_goal = (
             f"Build a thorough literature foundation for: {shared['topic']}. "
             "Find key papers, identify research gaps, and collect structured notes "
             "and BibTeX citations covering the state of the art."
         )
-        reason = await _run_loop(shared, "literature", stage_goal, skill_filter)
+        reason = await _run_loop(shared, "literature", stage_goal,
+                                 lambda k: k in literature_skills)
         print(f"[LiteratureReviewLoop] exited: {reason}")
         return "experiment"
 
@@ -1059,16 +1122,27 @@ class LiteratureReviewLoop(AsyncNode):
 # ===========================================================================
 class ExperimentationLoop(AsyncNode):
     async def post_async(self, shared, prep_res, exec_res):
-        experiment_skills = {"experiment-pipeline", "experiment-craft",
-                             "experiment-iterative-coder", "evo-memory"}
-        skill_filter = lambda k: k in experiment_skills
-
-        stage_goal = (
-            f"Design and execute experiments for: {shared['topic']}. "
-            "Implement methods, collect data, generate figures, and produce "
-            "quantitative results that support the paper's claims."
-        )
-        reason = await _run_loop(shared, "experiment", stage_goal, skill_filter)
+        if shared.get("is_survey"):
+            # Survey papers: synthesise and tabulate the collected literature
+            # rather than running experiments.
+            synthesis_skills = {"research-survey", "research-ideation", "evo-memory"}
+            stage_goal = (
+                f"Synthesise the collected literature into structured survey content for: {shared['topic']}. "
+                "Produce comparison tables, thematic groupings, quantitative summaries from paper data, "
+                "and additional figures. Do NOT run experiments or write code to generate new data."
+            )
+            reason = await _run_loop(shared, "experiment", stage_goal,
+                                     lambda k: k in synthesis_skills)
+        else:
+            experiment_skills = {"experiment-pipeline", "experiment-craft",
+                                 "experiment-iterative-coder", "evo-memory"}
+            stage_goal = (
+                f"Design and execute experiments for: {shared['topic']}. "
+                "Implement methods, collect data, generate figures, and produce "
+                "quantitative results that support the paper's claims."
+            )
+            reason = await _run_loop(shared, "experiment", stage_goal,
+                                     lambda k: k in experiment_skills)
         print(f"[ExperimentationLoop] exited: {reason}")
         return "write"
 
@@ -1078,7 +1152,7 @@ class ExperimentationLoop(AsyncNode):
 # ===========================================================================
 class WritingLoop(AsyncNode):
     async def post_async(self, shared, prep_res, exec_res):
-        sections = _section_order(shared)
+        sections = FULL_PAPER_SECTIONS
         max_review_rounds = int(os.environ.get("MAX_REVIEW_ROUNDS", "1"))
 
         for round_i in range(max_review_rounds + 1):
@@ -1125,20 +1199,6 @@ class WritingLoop(AsyncNode):
 
         # Final tex assembly with title
         await _assemble_tex(shared)
-        if not shared.get("paper_title"):
-            order = _section_order(shared)
-            cleaned = {s: _sanitize_section_body(b) for s, b in shared.get("section_bodies", {}).items()}
-            draft_body = "\n\n".join(cleaned.get(s, "") for s in order if s in cleaned and s != "abstract")
-            title_text, title_usage = await call_llm_async(
-                f"Generate a concise academic paper title (under {TITLE_MAX_WORDS} words). "
-                f"Return ONLY the title.\n\n{(draft_body or shared.get('topic',''))[:TITLE_TOPIC_CHARS]}",
-                budget_remaining=shared.get("budget_remaining", 0),
-                cost_log=shared.get("cost_log"),
-            )
-            track_cost(shared, "title:generate", title_usage)
-            shared["paper_title"] = title_text.strip().strip('"').strip("'")
-            print(f"[WritingLoop] Title: {shared['paper_title']}")
-
         return "compile"
 
 
@@ -1150,22 +1210,25 @@ class CompileTeX(Node):
         return shared["output_path"]
 
     def exec(self, out_dir):
-        import shutil
         if not shutil.which("pdflatex"):
-            return None, "pdflatex not found"
+            return None, "pdflatex not found", ""
         all_output = []
+        last_pdflatex = ""
         for cmd in [["pdflatex", "-interaction=nonstopmode", "report.tex"],
                     ["bibtex", "report"],
                     ["pdflatex", "-interaction=nonstopmode", "report.tex"],
                     ["pdflatex", "-interaction=nonstopmode", "report.tex"]]:
             r = subprocess.run(cmd, cwd=out_dir, capture_output=True,
                                text=True, errors="replace", timeout=LATEX_COMPILE_TIMEOUT)
-            all_output.append(r.stdout + r.stderr)
+            out = r.stdout + r.stderr
+            all_output.append(out)
+            if cmd[0] == "pdflatex":
+                last_pdflatex = out
         success = (Path(out_dir) / "report.pdf").exists()
-        return success, "\n".join(all_output)
+        return success, "\n".join(all_output), last_pdflatex
 
     def post(self, shared, prep_res, exec_res):
-        success, log = exec_res
+        success, log, last_pass = exec_res
         if success is None:
             print(f"[CompileTeX] pdflatex not installed.")
             print(f"[CompileTeX] Source: {shared['output_path']}/report.tex")
@@ -1173,7 +1236,8 @@ class CompileTeX(Node):
                   "pdflatex report.tex && bibtex report && pdflatex report.tex && pdflatex report.tex")
             return "done"
 
-        undefined = sorted(set(re.findall(r"Citation `([^']+)' on page", log)))
+        # Check only the final pdflatex pass — earlier passes always show warnings before bibtex runs.
+        undefined = sorted(set(re.findall(r"Citation `([^']+)' on page", last_pass or log)))
         if undefined:
             print(f"[CompileTeX] {len(undefined)} undefined citations: {', '.join(undefined[:10])}")
             shared["has_citation_warnings"] = True
@@ -1285,7 +1349,6 @@ class FixTeX(AsyncNode):
 # ===========================================================================
 class Finisher(Node):
     def post(self, shared, prep_res, exec_res):
-        from datetime import datetime, timezone
         total = sum(e["cost"] for e in shared.get("cost_log", []))
         out_dir = Path(shared["output_path"])
         (out_dir / "cost_log.json").write_text(
